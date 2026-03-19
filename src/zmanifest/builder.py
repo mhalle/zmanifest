@@ -16,6 +16,15 @@ import rfc8785
 from ._types import Addressing, compute_addressing
 
 
+def canonical_json(text: str) -> str:
+    """Canonicalize a JSON string via RFC 8785.
+
+    Returns the canonical form as a string. Raises ``json.JSONDecodeError``
+    if the input is not valid JSON.
+    """
+    return rfc8785.dumps(json.loads(text)).decode("utf-8")
+
+
 def git_blob_hash(content: bytes) -> str:
     """Compute git blob SHA-1: SHA-1('blob <size>\\0<content>')."""
     header = f"blob {len(content)}\0".encode()
@@ -336,8 +345,7 @@ class Builder:
         # Auto-compute retrieval_key
         if retrieval_key is None:
             if text is not None:
-                canonical = rfc8785.dumps(json.loads(text))
-                retrieval_key = git_blob_hash(canonical)
+                retrieval_key = git_blob_hash(text.encode("utf-8"))
             elif data is not None:
                 retrieval_key = git_blob_hash(data)
 

@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import rfc8785
 
-from .builder import git_blob_hash
+from .builder import canonical_json, git_blob_hash
 from .manifest import Manifest
 from .resolver import BlobResolver
 
@@ -61,11 +61,14 @@ def hash(
     for i in range(len(table)):
         existing_key = rk_col[i].as_py() if rk_col is not None else None
 
-        # Try inline text (canonicalize JSON)
+        # Try inline text (canonicalize JSON if valid, else hash raw)
         text = text_col[i].as_py() if text_col is not None else None
         if text is not None:
-            canonical = rfc8785.dumps(json.loads(text))
-            new_keys.append(git_blob_hash(canonical))
+            try:
+                text = canonical_json(text)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+            new_keys.append(git_blob_hash(text.encode("utf-8")))
             continue
 
         # Try inline data
