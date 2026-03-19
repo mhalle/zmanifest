@@ -21,7 +21,7 @@ class ManifestEntry:
     content_size: int | None = None
     retrieval_key: str | None = None
     text: str | None = None
-    external_uri: str | None = None
+    uri: str | None = None
     offset: int | None = None
     length: int | None = None
     array_path: str | None = None
@@ -230,7 +230,7 @@ class Manifest:
             content_size=_scalar(t, "content_size", idx),
             retrieval_key=_scalar(t, "retrieval_key", idx),
             text=_scalar(t, "text", idx),
-            external_uri=_scalar(t, "external_uri", idx),
+            uri=_scalar(t, "uri", idx),
             offset=_scalar(t, "offset", idx),
             length=_scalar(t, "length", idx),
             array_path=_scalar(t, "array_path", idx),

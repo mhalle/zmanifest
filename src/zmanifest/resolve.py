@@ -123,15 +123,15 @@ async def resolve_entry(
             return blob
 
     # 4. Link — follow target path in the same manifest
-    if Addressing.LINK in flags and entry.external_uri is not None:
+    if Addressing.LINK in flags and entry.uri is not None:
         if _visited is None:
             _visited = set()
         if entry.path in _visited:
             raise ValueError(
-                f"Circular link detected: {entry.path!r} -> {entry.external_uri!r}"
+                f"Circular link detected: {entry.path!r} -> {entry.uri!r}"
             )
         _visited.add(entry.path)
-        target_entry = manifest.get_entry(entry.external_uri)
+        target_entry = manifest.get_entry(entry.uri)
         if target_entry is not None:
             target_base = target_entry.base_uri or base_uri
             return await resolve_entry(
@@ -140,7 +140,7 @@ async def resolve_entry(
 
     # 5. External URI (with optional byte range)
     if Addressing.URI in flags:
-        uri = resolve_uri(entry.external_uri, base_uri)
+        uri = resolve_uri(entry.uri, base_uri)
         blob = await fetch_uri(uri, entry.offset, entry.length)
         if blob is not None:
             return blob

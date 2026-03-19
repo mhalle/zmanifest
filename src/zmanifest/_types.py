@@ -17,7 +17,7 @@ def compute_addressing(
     text: str | None = None,
     data: bytes | None = None,
     retrieval_key: str | None = None,
-    external_uri: str | None = None,
+    uri: str | None = None,
     is_link: bool = False,
 ) -> list[Addressing]:
     """Compute addressing flags from populated fields."""
@@ -28,7 +28,7 @@ def compute_addressing(
         flags.append(Addressing.DATA)
     if retrieval_key is not None:
         flags.append(Addressing.KEY)
-    if external_uri is not None and not is_link:
+    if uri is not None and not is_link:
         flags.append(Addressing.URI)
     if is_link:
         flags.append(Addressing.LINK)

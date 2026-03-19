@@ -66,7 +66,7 @@ class _Row:
     retrieval_key: str | None = None
     text: str | None = None
     data: bytes | None = None
-    external_uri: str | None = None
+    uri: str | None = None
     offset: int | None = None
     length: int | None = None
     array_path: str | None = None
@@ -85,7 +85,7 @@ class _Row:
             text=self.text,
             data=self.data,
             retrieval_key=self.retrieval_key,
-            external_uri=self.external_uri,
+            uri=self.uri,
             is_link=self.is_link,
         )
         if self.is_mount:
@@ -236,7 +236,7 @@ class Builder:
             path=path,
             size=0,
             id=id,
-            external_uri=uri,
+            uri=uri,
             media_type=media_type,
             base_uri=base_uri,
             metadata=self._encode_metadata(metadata),
@@ -272,7 +272,7 @@ class Builder:
             path=path,
             size=0,
             id=id,
-            external_uri=target,
+            uri=target,
             media_type=media_type,
             metadata=self._encode_metadata(metadata),
             is_link=True,
@@ -325,7 +325,7 @@ class Builder:
             source: Provenance string.
             checksum: Multihash for verification (e.g. ``"sha256:abc..."``).
             base_uri: Base URI for resolving this entry's relative
-                external_uri. Overrides the store-level base_uri.
+                uri. Overrides the store-level base_uri.
             metadata: Per-entry metadata dict (stored as JSON).
 
         Returns:
@@ -361,7 +361,7 @@ class Builder:
             retrieval_key=retrieval_key,
             text=text,
             data=data,
-            external_uri=uri,
+            uri=uri,
             offset=offset,
             length=length,
             array_path=array_path,
@@ -398,7 +398,7 @@ class Builder:
                 "retrieval_key": pa.array(_col("retrieval_key"), type=pa.string()),
                 "text": pa.array(_col("text"), type=pa.string()),
                 "data": pa.array(_col("data"), type=pa.binary()),
-                "external_uri": pa.array(_col("external_uri"), type=pa.string()),
+                "uri": pa.array(_col("uri"), type=pa.string()),
                 "offset": pa.array(_col("offset"), type=pa.int64()),
                 "length": pa.array(_col("length"), type=pa.int64()),
                 "array_path": pa.array(_col("array_path"), type=pa.string()),
