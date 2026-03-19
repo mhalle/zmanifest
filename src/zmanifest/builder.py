@@ -16,20 +16,11 @@ import rfc8785
 from ._types import Addressing, compute_addressing
 
 
-def _git_blob_hash(content: bytes) -> str:
+def git_blob_hash(content: bytes) -> str:
     """Compute git blob SHA-1: SHA-1('blob <size>\\0<content>')."""
     header = f"blob {len(content)}\0".encode()
     return hashlib.sha1(header + content).hexdigest()
 
-
-def _canonical_hash(content: bytes) -> str:
-    """Hash content, canonicalizing JSON before hashing."""
-    try:
-        obj = json.loads(content)
-        content = rfc8785.dumps(obj)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        pass
-    return _git_blob_hash(content)
 
 
 def _parse_array_path_and_chunk_key(
@@ -345,9 +336,10 @@ class Builder:
         # Auto-compute retrieval_key
         if retrieval_key is None:
             if text is not None:
-                retrieval_key = _canonical_hash(text.encode("utf-8"))
+                canonical = rfc8785.dumps(json.loads(text))
+                retrieval_key = git_blob_hash(canonical)
             elif data is not None:
-                retrieval_key = _git_blob_hash(data)
+                retrieval_key = git_blob_hash(data)
 
         # Auto-infer array_path / chunk_key from path
         if array_path is None and chunk_key is None:

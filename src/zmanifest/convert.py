@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import rfc8785
 
-from .builder import _git_blob_hash, _canonical_hash
+from .builder import git_blob_hash
 from .manifest import Manifest
 from .resolver import BlobResolver
 
@@ -64,13 +64,14 @@ def hash(
         # Try inline text (canonicalize JSON)
         text = text_col[i].as_py() if text_col is not None else None
         if text is not None:
-            new_keys.append(_canonical_hash(text.encode("utf-8")))
+            canonical = rfc8785.dumps(json.loads(text))
+            new_keys.append(git_blob_hash(canonical))
             continue
 
         # Try inline data
         data = data_col[i].as_py() if data_col is not None else None
         if data is not None:
-            new_keys.append(_git_blob_hash(data))
+            new_keys.append(git_blob_hash(data))
             continue
 
         # Try resolver
@@ -151,9 +152,9 @@ def dehydrate(
             blob = data_col[i].as_py()
             if blob is None:
                 continue
-            key = rk_col[i].as_py() if rk_col is not None else _git_blob_hash(blob)
+            key = rk_col[i].as_py() if rk_col is not None else git_blob_hash(blob)
             if key is None:
-                key = _git_blob_hash(blob)
+                key = git_blob_hash(blob)
             blob_path = chunk_dir / key
             if not blob_path.exists():
                 blob_path.write_bytes(blob)

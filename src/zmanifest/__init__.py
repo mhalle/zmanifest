@@ -1,5 +1,5 @@
 from ._types import Addressing, ManifestMetadata
-from .builder import Builder, _git_blob_hash, _canonical_hash
+from .builder import Builder, git_blob_hash
 from .convert import dehydrate, hash, hydrate
 from .manifest import Manifest, ManifestEntry
 from .resolve import (
@@ -18,6 +18,7 @@ __all__ = [
     "Builder",
     "FileResolver",
     "GitResolver",
+    "git_blob_hash",
     "HTTPResolver",
     "Manifest",
     "ManifestEntry",
