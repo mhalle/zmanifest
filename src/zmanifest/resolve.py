@@ -88,11 +88,19 @@ async def resolve_entry(
     manifest: Manifest,
     resolver: BlobResolver | None,
     base_uri: str | None = None,
+    _visited: set[str] | None = None,
 ) -> bytes | None:
-    """Resolve content following the spec S4 resolution order.
+    """Resolve content following the spec resolution order.
 
     Uses the entry's addressing flags to skip resolution steps that
     can't succeed, avoiding unnecessary work.
+
+    Resolution order:
+    1. Inline text (T)
+    2. Inline data (D)
+    3. Content-addressed lookup via retrieval_key (K)
+    4. Link — follow target path in the same manifest (L)
+    5. External URI with optional byte range (U)
     """
     from ._types import Addressing
 
@@ -114,7 +122,23 @@ async def resolve_entry(
         if blob is not None:
             return blob
 
-    # 4. External URI (with optional byte range)
+    # 4. Link — follow target path in the same manifest
+    if Addressing.LINK in flags and entry.external_uri is not None:
+        if _visited is None:
+            _visited = set()
+        if entry.path in _visited:
+            raise ValueError(
+                f"Circular link detected: {entry.path!r} -> {entry.external_uri!r}"
+            )
+        _visited.add(entry.path)
+        target_entry = manifest.get_entry(entry.external_uri)
+        if target_entry is not None:
+            target_base = target_entry.base_uri or base_uri
+            return await resolve_entry(
+                target_entry, manifest, resolver, target_base, _visited,
+            )
+
+    # 5. External URI (with optional byte range)
     if Addressing.URI in flags:
         uri = resolve_uri(entry.external_uri, base_uri)
         blob = await fetch_uri(uri, entry.offset, entry.length)

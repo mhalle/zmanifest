@@ -77,6 +77,7 @@ class _Row:
     base_uri: str | None = None
     metadata: str | None = None  # JSON string
     is_mount: bool = False
+    is_link: bool = False
 
     @property
     def addressing(self) -> list[str]:
@@ -85,6 +86,7 @@ class _Row:
             data=self.data,
             retrieval_key=self.retrieval_key,
             external_uri=self.external_uri,
+            is_link=self.is_link,
         )
         if self.is_mount:
             flags.insert(0, Addressing.MOUNT)
@@ -239,6 +241,41 @@ class Builder:
             base_uri=base_uri,
             metadata=self._encode_metadata(metadata),
             is_mount=True,
+        ))
+
+    def link(
+        self,
+        path: str,
+        target: str,
+        *,
+        id: str | None = None,
+        media_type: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        """Create a link entry that points to another path in the manifest.
+
+        When resolved, the link's content comes from the target entry.
+        The link row itself can carry its own metadata, id, and media_type.
+
+        The target path is always relative to the manifest root.
+
+        Args:
+            path: The link's path in the manifest.
+            target: Path of the target entry (relative to manifest root).
+            id: Optional short identifier.
+            media_type: MIME type hint.
+            metadata: Per-entry metadata dict.
+        """
+        # Remove any existing row for this path
+        self._rows = [r for r in self._rows if r.path != path]
+        self._rows.append(_Row(
+            path=path,
+            size=0,
+            id=id,
+            external_uri=target,
+            media_type=media_type,
+            metadata=self._encode_metadata(metadata),
+            is_link=True,
         ))
 
     def add(
