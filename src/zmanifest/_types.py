@@ -16,6 +16,7 @@ def compute_addressing(
     *,
     text: str | None = None,
     data: bytes | None = None,
+    data_z: bytes | None = None,
     resolve: dict | str | None = None,
     is_link: bool = False,
     is_mount: bool = False,
@@ -27,6 +28,8 @@ def compute_addressing(
         flags += Addressing.TEXT
     if data is not None:
         flags += Addressing.DATA
+    if data_z is not None:
+        flags += Addressing.DATA_Z
     if resolve is not None and not is_link:
         flags += Addressing.RESOLVE
     if is_link:
@@ -43,6 +46,7 @@ class Addressing(enum.StrEnum):
 
     TEXT = "T"
     DATA = "D"
+    DATA_Z = "Z"
     RESOLVE = "R"
     LINK = "L"
     MOUNT = "M"

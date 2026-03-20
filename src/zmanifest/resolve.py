@@ -112,8 +112,8 @@ async def resolve_entry(
     if Addressing.TEXT in flags and entry.text is not None:
         return entry.text.encode("utf-8")
 
-    # 2. Inline data (binary)
-    if Addressing.DATA in flags:
+    # 2. Inline data (binary — uncompressed or compressed column)
+    if Addressing.DATA in flags or Addressing.DATA_Z in flags:
         data = manifest.get_data(entry.path)
         if data is not None:
             return data

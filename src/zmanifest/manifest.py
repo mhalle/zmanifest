@@ -52,6 +52,7 @@ class Manifest:
 
         all_columns = self._pf.schema_arrow.names
         self._has_data_column = "data" in all_columns
+        self._has_data_z_column = "data_z" in all_columns
 
         # Try fast path: load index from root row (row 0)
         if self._try_load_index():
@@ -65,11 +66,12 @@ class Manifest:
             )
             eager_data = total < 256 * 1024 * 1024
 
-        if eager_data and self._has_data_column:
+        has_any_data = self._has_data_column or self._has_data_z_column
+        if eager_data and has_any_data:
             self._table = self._pf.read()
             self._data_table: pa.Table | None = self._table
         else:
-            load_columns = [c for c in all_columns if c != "data"]
+            load_columns = [c for c in all_columns if c not in ("data", "data_z")]
             self._table = self._pf.read(columns=load_columns)
             self._data_table = None
 
@@ -377,12 +379,13 @@ class Manifest:
         return self._entry_at(idx)
 
     def get_data(self, path: str) -> bytes | None:
-        """Read the ``data`` column for a specific row.
+        """Read inline binary data for a specific row.
 
-        If data was loaded eagerly, this is an O(1) lookup. Otherwise,
-        reads the specific row group from the parquet file on demand.
+        Checks both ``data`` (uncompressed) and ``data_z`` (compressed)
+        columns. If data was loaded eagerly, this is an O(1) lookup.
+        Otherwise, reads the specific row group from parquet on demand.
         """
-        if not self._has_data_column:
+        if not self._has_data_column and not self._has_data_z_column:
             return None
         idx = self._index.get(path)
         if idx is None:
@@ -390,9 +393,23 @@ class Manifest:
 
         # Fast path: data already in memory
         if self._data_table is not None:
-            return self._data_table.column("data")[idx].as_py()
+            if self._has_data_column:
+                val = self._data_table.column("data")[idx].as_py()
+                if val is not None:
+                    return val
+            if self._has_data_z_column:
+                val = self._data_table.column("data_z")[idx].as_py()
+                if val is not None:
+                    return val
+            return None
 
         # Slow path: read from parquet per row group
+        columns = []
+        if self._has_data_column:
+            columns.append("data")
+        if self._has_data_z_column:
+            columns.append("data_z")
+
         row_groups = self._pf.metadata.num_row_groups
         cumulative = 0
         for rg_idx in range(row_groups):
@@ -400,10 +417,13 @@ class Manifest:
             if cumulative + rg_rows > idx:
                 local_idx = idx - cumulative
                 rg_table = self._pf.read_row_groups(
-                    [rg_idx], columns=["data"]
+                    [rg_idx], columns=columns,
                 )
-                val = rg_table.column("data")[local_idx].as_py()
-                return val
+                for col in columns:
+                    val = rg_table.column(col)[local_idx].as_py()
+                    if val is not None:
+                        return val
+                return None
             cumulative += rg_rows
         return None
 

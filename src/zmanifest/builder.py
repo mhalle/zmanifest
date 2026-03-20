@@ -46,7 +46,8 @@ class _Row:
     content_size: int | None = None
     checksum: str | None = None
     text: str | None = None
-    data: bytes | None = None
+    data: bytes | None = None  # uncompressed binary (parquet compression=none)
+    data_z: bytes | None = None  # compressible binary (parquet compression=zstd)
     resolve: str | None = None  # JSON string
     base_resolve: str | None = None  # JSON string
     content_type: str | None = None
@@ -62,6 +63,7 @@ class _Row:
         return compute_addressing(
             text=self.text,
             data=self.data,
+            data_z=self.data_z,
             resolve=self.resolve,
             is_link=self.is_link,
             is_mount=self.is_mount,
@@ -251,6 +253,7 @@ class Builder:
         *,
         text: str | None = None,
         data: bytes | None = None,
+        data_z: bytes | None = None,
         resolve: dict | None = None,
         size: int | None = None,
         content_size: int | None = None,
@@ -270,11 +273,14 @@ class Builder:
         Args:
             path: Store path (e.g. ``"zarr.json"``, ``"arr/c/0/1"``).
             text: Inline text content.
-            data: Inline binary content.
+            data: Inline binary content (stored uncompressed in parquet).
+                Use for pre-compressed data (zarr chunks, .zmp files, etc.).
+            data_z: Inline binary content (stored with zstd compression in
+                parquet). Use for compressible raw data (uncompressed pixels, etc.).
             resolve: Resolution dict keyed by scheme
                 (e.g. ``{"http": {"url": "..."}, "git": {"oid": "..."}}``).
-            size: Size in bytes. Auto-computed from ``text`` or ``data``
-                if not provided.
+            size: Size in bytes. Auto-computed from ``text``, ``data``,
+                or ``data_z`` if not provided.
             content_size: Logical/decoded size in bytes (optional).
             checksum: Content hash for verification.
             id: Optional short identifier for cross-referencing.
@@ -285,12 +291,17 @@ class Builder:
                 scheme-specific resolution, keyed by scheme.
             metadata: Per-entry metadata dict (stored as JSON).
         """
+        if data is not None and data_z is not None:
+            raise ValueError("Cannot set both data and data_z")
+
         # Auto-compute size
         if size is None:
             if text is not None:
                 size = len(text.encode("utf-8"))
             elif data is not None:
                 size = len(data)
+            elif data_z is not None:
+                size = len(data_z)
             else:
                 size = 0
 
@@ -300,6 +311,8 @@ class Builder:
                 checksum = git_blob_hash(text.encode("utf-8"))
             elif data is not None:
                 checksum = git_blob_hash(data)
+            elif data_z is not None:
+                checksum = git_blob_hash(data_z)
 
         resolve_json = json.dumps(resolve, separators=(",", ":")) if resolve else None
         base_resolve_json = json.dumps(base_resolve, separators=(",", ":")) if base_resolve else None
@@ -312,6 +325,7 @@ class Builder:
             checksum=checksum,
             text=text,
             data=data,
+            data_z=data_z,
             resolve=resolve_json,
             base_resolve=base_resolve_json,
             content_type=content_type,
@@ -335,9 +349,12 @@ class Builder:
 
         # Data rows first (one per row group), then non-data rows in the
         # final row group with the index row last.
-        data_rows = sorted([r for r in self._rows if r.data is not None], key=lambda r: r.path)
+        def _has_data(r: _Row) -> bool:
+            return r.data is not None or r.data_z is not None
+
+        data_rows = sorted([r for r in self._rows if _has_data(r)], key=lambda r: r.path)
         non_data_no_root = sorted(
-            [r for r in self._rows if r.data is None and r.path != ""],
+            [r for r in self._rows if not _has_data(r) and r.path != ""],
             key=lambda r: r.path,
         )
         root_rows = [r for r in self._rows if r.path == ""]
@@ -376,6 +393,7 @@ class Builder:
                 "checksum": pa.array(_col("checksum"), type=pa.string()),
                 "text": pa.array(_col("text"), type=pa.string()),
                 "data": pa.array(_col("data"), type=pa.binary()),
+                "data_z": pa.array(_col("data_z"), type=pa.binary()),
                 "resolve": pa.array(_col("resolve"), type=pa.string()),
                 "base_resolve": pa.array(_col("base_resolve"), type=pa.string()),
                 "content_type": pa.array(_col("content_type"), type=pa.string()),
@@ -401,11 +419,14 @@ class Builder:
         schema = table.schema.with_metadata(file_meta)
         table = table.cast(schema)
 
-        # Compression
+        # Compression: data is uncompressed (pre-compressed content),
+        # data_z is zstd (compressible content), everything else is zstd.
         compression = {col: "zstd" for col in table.schema.names}
-        compression["data"] = self._data_compression
+        compression["data"] = "none"
+        compression["data_z"] = "zstd"
         use_dictionary = {col: True for col in table.schema.names}
         use_dictionary["data"] = False
+        use_dictionary["data_z"] = False
 
         compression_level = None
         if self._data_compression_level is not None:
