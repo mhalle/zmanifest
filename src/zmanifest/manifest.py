@@ -17,16 +17,16 @@ class ManifestEntry:
 
     path: str
     size: int
-    addressing: list[str] = field(default_factory=list)
+    addressing: str = ""
     content_size: int | None = None
-    retrieval_key: str | None = None
+    checksum: str | None = None
     text: str | None = None
-    uri: str | None = None
-    offset: int | None = None
-    length: int | None = None
+    resolve: str | None = None  # JSON string
+    base_resolve: str | None = None  # JSON string
+    id: str | None = None
     media_type: str | None = None
     source: str | None = None
-    base_uri: str | None = None
+    metadata: str | None = None  # JSON string
 
 
 def _scalar(table: pa.Table, col: str, idx: int) -> Any:
@@ -174,7 +174,7 @@ class Manifest:
         for entry_dict in index_data:
             path = entry_dict["p"]
             row_num = entry_dict["r"]
-            addressing = entry_dict.get("a", [])
+            addressing = entry_dict.get("a", "")
             # Non-data row group has full entry details
             rg = rg_entries.get(path, {})
             entry = ManifestEntry(
@@ -182,14 +182,14 @@ class Manifest:
                 size=rg.get("size") or 0,
                 addressing=addressing,
                 content_size=rg.get("content_size"),
-                retrieval_key=rg.get("retrieval_key"),
+                checksum=rg.get("checksum"),
                 text=rg.get("text"),
-                uri=rg.get("uri"),
-                offset=rg.get("offset"),
-                length=rg.get("length"),
+                resolve=rg.get("resolve"),
+                base_resolve=rg.get("base_resolve"),
+                id=rg.get("id"),
                 media_type=rg.get("media_type"),
                 source=rg.get("source"),
-                base_uri=rg.get("base_uri"),
+                metadata=rg.get("metadata"),
             )
             self._indexed_entries[path] = entry
             self._indexed_row_map[path] = row_num
@@ -351,17 +351,17 @@ class Manifest:
         addr = _scalar(t, "addressing", idx)
         return ManifestEntry(
             path=_scalar(t, "path", idx),
-            size=_scalar(t, "size", idx),
-            addressing=addr if addr is not None else [],
+            size=_scalar(t, "size", idx) or 0,
+            addressing=addr if addr is not None else "",
             content_size=_scalar(t, "content_size", idx),
-            retrieval_key=_scalar(t, "retrieval_key", idx),
+            checksum=_scalar(t, "checksum", idx),
             text=_scalar(t, "text", idx),
-            uri=_scalar(t, "uri", idx),
-            offset=_scalar(t, "offset", idx),
-            length=_scalar(t, "length", idx),
+            resolve=_scalar(t, "resolve", idx),
+            base_resolve=_scalar(t, "base_resolve", idx),
+            id=_scalar(t, "id", idx),
             media_type=_scalar(t, "media_type", idx),
             source=_scalar(t, "source", idx),
-            base_uri=_scalar(t, "base_uri", idx),
+            metadata=_scalar(t, "metadata", idx),
         )
 
     def get_entry(self, path: str) -> ManifestEntry | None:

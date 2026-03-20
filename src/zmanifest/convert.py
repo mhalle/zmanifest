@@ -16,16 +16,22 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import rfc8785
 
+from typing import Protocol
+
 from .builder import canonical_json, git_blob_hash
 from .manifest import Manifest
-from .resolver import BlobResolver
+
+
+class _LegacyResolver(Protocol):
+    """Legacy resolver interface for convert operations."""
+    async def resolve(self, retrieval_key: str) -> bytes | None: ...
 
 
 def hash(
     input: str | Path,
     output: str | Path,
     *,
-    resolver: BlobResolver | None = None,
+    resolver: _LegacyResolver | None = None,
     max_rows_per_group: int | None = None,
 ) -> Path:
     """Compute git-sha1 retrieval keys for manifest entries.
@@ -178,7 +184,7 @@ def dehydrate(
 def hydrate(
     input: str | Path,
     output: str | Path,
-    resolver: BlobResolver,
+    resolver: _LegacyResolver,
     *,
     paths: list[str] | None = None,
     prefix: str | None = None,

@@ -1,93 +1,208 @@
+"""Built-in resolvers for common schemes."""
+
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin
 
 if TYPE_CHECKING:
     from vost import GitStore
 
 
-@runtime_checkable
-class BlobResolver(Protocol):
-    async def resolve(self, retrieval_key: str) -> bytes | None: ...
+_http_client = None
 
 
-class GitResolver:
-    """Resolves blobs from a vost GitStore (bare git repository).
+def _get_http_client() -> Any:
+    """Return a shared httpx.AsyncClient with connection pooling."""
+    global _http_client
+    if _http_client is None:
+        import httpx
+        _http_client = httpx.AsyncClient(
+            timeout=60,
+            http2=True,
+        )
+    return _http_client
 
-    Requires the ``vost`` package (install with ``pip install zarr-manifest-parquet[git]``).
-    Handles both loose and packed objects transparently via dulwich.
+
+class HttpResolver:
+    """Resolves content via HTTP(S) URLs or local file paths.
+
+    Handles relative URLs via base params, byte ranges via offset/length,
+    and multipart/related responses (DICOMweb).
+
+    Params: url, offset?, length?
+    Base params: url (base URL for relative resolution)
     """
 
-    def __init__(self, store: GitStore | str | Path) -> None:
-        from vost import GitStore as _GitStore
+    async def resolve(self, params: dict, base: dict | None = None) -> bytes | None:
+        from .resolve import _extract_multipart_frame
 
-        if isinstance(store, _GitStore):
-            self._store = store
-        else:
-            self._store = _GitStore.open(str(store), create=False)
-
-    async def resolve(self, retrieval_key: str) -> bytes | None:
-        if not self._store.has_hash(retrieval_key):
+        url = params.get("url")
+        if url is None:
             return None
-        return self._store.read_by_hash(retrieval_key)
 
+        # Resolve relative URL against base
+        if base and "url" in base:
+            base_url = base["url"]
+            if "://" not in url and not url.startswith("/"):
+                if base_url.startswith(("http://", "https://")):
+                    url = urljoin(base_url, url)
+                else:
+                    url = os.path.normpath(os.path.join(base_url, url))
 
-class TemplateResolver:
-    """Resolves blobs using a URL/path template with ``{hash}`` placeholder.
-
-    For local paths, reads from the filesystem. For HTTP(S) URLs, fetches
-    via httpx.
-
-    Examples::
-
-        TemplateResolver("/data/blobs/{hash}")
-        TemplateResolver("/data/objects/{hash[:2]}/{hash[2:]}")
-        TemplateResolver("https://cdn.example.com/blobs/{hash}")
-    """
-
-    def __init__(self, template: str) -> None:
-        self._template = template
-        self._is_http = template.startswith("http://") or template.startswith("https://")
-
-    def _expand(self, retrieval_key: str) -> str:
-        # Support {hash}, {hash[:2]}, {hash[2:]} style slicing
-        import re
-
-        def _replace(m: re.Match[str]) -> str:
-            expr = m.group(1)
-            if expr == "hash":
-                return retrieval_key
-            # Handle slice notation: hash[:2], hash[2:]
-            slice_match = re.fullmatch(r"hash\[(-?\d*):(-?\d*)\]", expr)
-            if slice_match:
-                start = int(slice_match.group(1)) if slice_match.group(1) else None
-                end = int(slice_match.group(2)) if slice_match.group(2) else None
-                return retrieval_key[start:end]
-            return m.group(0)
-
-        return re.sub(r"\{([^}]+)\}", _replace, self._template)
-
-    async def resolve(self, retrieval_key: str) -> bytes | None:
-        location = self._expand(retrieval_key)
-
-        if self._is_http:
-            import httpx
-
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(location)
-                if resp.status_code == 200:
-                    return resp.content
-                return None
-        else:
+        # Local file path
+        if not url.startswith(("http://", "https://")):
+            path = url
+            if path.startswith("file://"):
+                path = path[7:]
             try:
-                with open(location, "rb") as f:
-                    return f.read()
+                with open(path, "rb") as fh:
+                    offset = params.get("offset")
+                    length = params.get("length")
+                    if offset is not None:
+                        fh.seek(offset)
+                    if length is not None:
+                        return fh.read(length)
+                    return fh.read()
             except FileNotFoundError:
                 return None
 
+        # HTTP fetch
+        client = _get_http_client()
+        offset = params.get("offset")
+        length = params.get("length")
+        if offset is not None and length is not None:
+            headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
+            resp = await client.get(url, headers=headers)
+        else:
+            resp = await client.get(url)
 
-# Convenience aliases
-FileResolver = TemplateResolver
-HTTPResolver = TemplateResolver
+        if resp.status_code not in (200, 206):
+            return None
+
+        ct = resp.headers.get("content-type", "")
+        if "multipart/related" in ct:
+            return _extract_multipart_frame(resp.content, ct)
+        return resp.content
+
+
+class GitResolver:
+    """Resolves blobs from git repositories.
+
+    Supports local bare repos (via vost/dulwich) and GitHub/GitLab
+    repos (via raw file URL).
+
+    Params: oid?, repo?, ref?, path?, offset?, length?
+    Base params: repo, ref
+    """
+
+    def __init__(self, repo: GitStore | str | Path | None = None) -> None:
+        self._default_repo = str(repo) if repo is not None else None
+        self._stores: dict[str, Any] = {}
+
+    def _get_store(self, repo_path: str) -> Any:
+        if repo_path not in self._stores:
+            from vost import GitStore as _GitStore
+            self._stores[repo_path] = _GitStore.open(repo_path, create=False)
+        return self._stores[repo_path]
+
+    async def resolve(self, params: dict, base: dict | None = None) -> bytes | None:
+        repo = params.get("repo") or (base or {}).get("repo") or self._default_repo
+        if repo is None:
+            return None
+
+        # By object hash
+        oid = params.get("oid")
+        if oid is not None:
+            if repo.startswith(("http://", "https://")):
+                return await self._resolve_remote_oid(repo, oid)
+            store = self._get_store(repo)
+            if not store.has_hash(oid):
+                return None
+            data = store.read_by_hash(oid)
+            return _apply_range(data, params)
+
+        # By ref + path
+        path = params.get("path")
+        if path is not None:
+            ref = params.get("ref") or (base or {}).get("ref", "HEAD")
+            if repo.startswith(("http://", "https://")):
+                return await self._resolve_remote_path(repo, ref, path, params)
+
+        return None
+
+    async def _resolve_remote_oid(self, repo_url: str, oid: str) -> bytes | None:
+        return None  # no standard HTTP API for fetching by oid
+
+    async def _resolve_remote_path(
+        self, repo_url: str, ref: str, path: str, params: dict,
+    ) -> bytes | None:
+        """Resolve from GitHub/GitLab via raw file URL."""
+        if "github.com" in repo_url:
+            raw_url = repo_url.replace("github.com", "raw.githubusercontent.com")
+            raw_url = raw_url.rstrip("/").removesuffix(".git")
+            raw_url = f"{raw_url}/{ref}/{path}"
+            client = _get_http_client()
+            resp = await client.get(raw_url)
+            if resp.status_code == 200:
+                return _apply_range(resp.content, params)
+        return None
+
+
+class DicomWebResolver:
+    """Resolves pixel data from DICOMweb WADO-RS endpoints.
+
+    Params: url?, study, series, instance, frame?
+    Base params: url (DICOMweb service base URL)
+    """
+
+    def __init__(self, headers: dict[str, str] | None = None) -> None:
+        self._headers = headers or {}
+
+    async def resolve(self, params: dict, base: dict | None = None) -> bytes | None:
+        from .resolve import _extract_multipart_frame
+
+        service_url = params.get("url") or (base or {}).get("url")
+        if service_url is None:
+            return None
+
+        study = params.get("study")
+        series = params.get("series")
+        instance = params.get("instance")
+        if not all([study, series, instance]):
+            return None
+
+        url = f"{service_url.rstrip('/')}/studies/{study}/series/{series}/instances/{instance}"
+        frame = params.get("frame")
+        if frame is not None:
+            url += f"/frames/{frame}"
+
+        client = _get_http_client()
+        headers = dict(self._headers)
+        headers.setdefault("Accept", "multipart/related; type=\"application/octet-stream\"")
+        resp = await client.get(url, headers=headers)
+
+        if resp.status_code not in (200, 206):
+            return None
+
+        ct = resp.headers.get("content-type", "")
+        if "multipart/related" in ct:
+            return _extract_multipart_frame(resp.content, ct)
+        return resp.content
+
+
+def _apply_range(data: bytes, params: dict) -> bytes:
+    """Apply optional offset/length range to bytes."""
+    offset = params.get("offset")
+    length = params.get("length")
+    if offset is not None:
+        data = data[offset:]
+    if length is not None:
+        data = data[:length]
+    return data
+
+
+# Convenience alias
+FileResolver = HttpResolver

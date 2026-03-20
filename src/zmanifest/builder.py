@@ -43,36 +43,29 @@ class _Row:
     path: str
     size: int
     id: str | None = None
-    content_size: int | None = None  # logical/decoded size (optional)
-    retrieval_key: str | None = None
+    content_size: int | None = None
+    checksum: str | None = None
     text: str | None = None
     data: bytes | None = None
-    uri: str | None = None
-    offset: int | None = None
-    length: int | None = None
+    resolve: str | None = None  # JSON string
+    base_resolve: str | None = None  # JSON string
     media_type: str | None = None
     source: str | None = None
-    checksum: str | None = None  # multihash, e.g. "sha256:abcdef..."
-    base_uri: str | None = None
     metadata: str | None = None  # JSON string
     is_mount: bool = False
     is_link: bool = False
     is_index: bool = False
 
     @property
-    def addressing(self) -> list[str]:
-        if self.is_index:
-            return [Addressing.INDEX]
-        flags = compute_addressing(
+    def addressing(self) -> str:
+        return compute_addressing(
             text=self.text,
             data=self.data,
-            retrieval_key=self.retrieval_key,
-            uri=self.uri,
+            resolve=self.resolve,
             is_link=self.is_link,
+            is_mount=self.is_mount,
+            is_index=self.is_index,
         )
-        if self.is_mount:
-            flags.insert(0, Addressing.MOUNT)
-        return flags
 
 
 class Builder:
@@ -107,18 +100,18 @@ class Builder:
         self,
         *,
         zarr_format: str = "3",
-        retrieval_scheme: str = "git-sha1",
         data_compression: str = "none",
         data_compression_level: int | None = None,
         max_rows_per_group: int | None = None,
         metadata: dict[str, object] | None = None,
+        base_resolve: dict | None = None,
     ) -> None:
         self._zarr_format = zarr_format
-        self._retrieval_scheme = retrieval_scheme
         self._data_compression = data_compression
         self._data_compression_level = data_compression_level
         self._max_rows_per_group = max_rows_per_group
         self._metadata = metadata or {}
+        self._base_resolve = base_resolve
         self._rows: list[_Row] = []
 
     @staticmethod
@@ -181,46 +174,38 @@ class Builder:
     def mount(
         self,
         path: str,
-        uri: str,
+        resolve: dict,
         *,
         id: str | None = None,
         media_type: str | None = None,
-        base_uri: str | None = None,
+        base_resolve: dict | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
         """Mount an external store at a path prefix.
 
         The mounted store is opened lazily on first access and handles
-        all reads under this prefix. Currently supports ``.zmp`` and
-        ``.zarr.zip`` targets.
+        all reads under this prefix.
 
         Args:
             path: Mount point path (trailing ``/`` added if missing).
-            uri: URI or local path to the mounted store.
+            resolve: Resolution dict (e.g. ``{"http": {"url": "child.zmp"}}``).
             id: Optional short identifier.
-            media_type: MIME type hint (auto-detected from extension if omitted).
-            base_uri: Base URI for resolving relative URIs within the
-                mounted store. Overrides the child's own base_uri.
+            media_type: MIME type hint.
+            base_resolve: Default resolution params for entries within
+                the mounted store, keyed by scheme.
             metadata: Per-entry metadata dict.
         """
         if not path.endswith("/"):
             path = path + "/"
-        # Auto-detect media type from extension
-        if media_type is None:
-            if uri.endswith(".zmp"):
-                media_type = "application/vnd.zmp"
-            elif uri.endswith(".zarr.zip"):
-                media_type = "application/zip"
-
         # Remove any existing row for this path
         self._rows = [r for r in self._rows if r.path != path]
         self._rows.append(_Row(
             path=path,
             size=0,
             id=id,
-            uri=uri,
+            resolve=json.dumps(resolve, separators=(",", ":")),
+            base_resolve=json.dumps(base_resolve, separators=(",", ":")) if base_resolve else None,
             media_type=media_type,
-            base_uri=base_uri,
             metadata=self._encode_metadata(metadata),
             is_mount=True,
         ))
@@ -237,8 +222,6 @@ class Builder:
         """Create a link entry that points to another path in the manifest.
 
         When resolved, the link's content comes from the target entry.
-        The link row itself can carry its own metadata, id, and media_type.
-
         The target path is always relative to the manifest root.
 
         Args:
@@ -248,13 +231,14 @@ class Builder:
             media_type: MIME type hint.
             metadata: Per-entry metadata dict.
         """
+        resolve_dict = {"_path": {"target": target}}
         # Remove any existing row for this path
         self._rows = [r for r in self._rows if r.path != path]
         self._rows.append(_Row(
             path=path,
             size=0,
             id=id,
-            uri=target,
+            resolve=json.dumps(resolve_dict, separators=(",", ":")),
             media_type=media_type,
             metadata=self._encode_metadata(metadata),
             is_link=True,
@@ -266,48 +250,37 @@ class Builder:
         *,
         text: str | None = None,
         data: bytes | None = None,
-        uri: str | None = None,
-        offset: int | None = None,
-        length: int | None = None,
+        resolve: dict | None = None,
         size: int | None = None,
         content_size: int | None = None,
-        retrieval_key: str | None = None,
+        checksum: str | None = None,
         id: str | None = None,
         media_type: str | None = None,
         source: str | None = None,
-        checksum: str | None = None,
-        base_uri: str | None = None,
+        base_resolve: dict | None = None,
         metadata: dict[str, object] | None = None,
-    ) -> str | None:
+    ) -> None:
         """Add an entry to the manifest.
 
         Supply one or more addressing sources. The ``addressing`` column
-        is computed automatically from which fields are set. A
-        ``retrieval_key`` is auto-computed (git-sha1) when ``text`` or
-        ``data`` is provided and no explicit key is given.
+        is computed automatically from which fields are set.
 
         Args:
             path: Store path (e.g. ``"zarr.json"``, ``"arr/c/0/1"``).
             text: Inline text content.
             data: Inline binary content.
-            uri: External URI or relative path.
-            offset: Byte offset within the URI resource.
-            length: Byte count to read from the URI resource.
-            size: Size in bytes of the stored content. Auto-computed
-                from ``text``, ``data``, or ``length`` if not provided.
+            resolve: Resolution dict keyed by scheme
+                (e.g. ``{"http": {"url": "..."}, "git": {"oid": "..."}}``).
+            size: Size in bytes. Auto-computed from ``text`` or ``data``
+                if not provided.
             content_size: Logical/decoded size in bytes (optional).
-            retrieval_key: Content hash. Auto-computed from ``text``
-                (canonical JSON) or ``data`` (raw bytes) if not provided.
+            checksum: Content hash for verification.
             id: Optional short identifier for cross-referencing.
             media_type: MIME type of the content.
             source: Provenance string.
-            checksum: Multihash for verification (e.g. ``"sha256:abc..."``).
-            base_uri: Base URI for resolving this entry's relative
-                uri. Overrides the store-level base_uri.
+            base_resolve: Default resolution params for this entry's
+                scheme-specific resolution, keyed by scheme.
             metadata: Per-entry metadata dict (stored as JSON).
-
-        Returns:
-            The retrieval key if one was computed or provided, else None.
         """
         # Auto-compute size
         if size is None:
@@ -315,36 +288,33 @@ class Builder:
                 size = len(text.encode("utf-8"))
             elif data is not None:
                 size = len(data)
-            elif length is not None:
-                size = length
             else:
                 size = 0
 
-        # Auto-compute retrieval_key
-        if retrieval_key is None:
+        # Auto-compute checksum from content
+        if checksum is None:
             if text is not None:
-                retrieval_key = git_blob_hash(text.encode("utf-8"))
+                checksum = git_blob_hash(text.encode("utf-8"))
             elif data is not None:
-                retrieval_key = git_blob_hash(data)
+                checksum = git_blob_hash(data)
+
+        resolve_json = json.dumps(resolve, separators=(",", ":")) if resolve else None
+        base_resolve_json = json.dumps(base_resolve, separators=(",", ":")) if base_resolve else None
 
         self._rows.append(_Row(
             path=path,
             size=size,
             id=id,
             content_size=content_size,
-            retrieval_key=retrieval_key,
+            checksum=checksum,
             text=text,
             data=data,
-            uri=uri,
-            offset=offset,
-            length=length,
+            resolve=resolve_json,
+            base_resolve=base_resolve_json,
             media_type=media_type,
             source=source,
-            checksum=checksum,
-            base_uri=base_uri,
             metadata=self._encode_metadata(metadata),
         ))
-        return retrieval_key
 
     def write(self, output: str | Path) -> Path:
         """Write the manifest to a ZMP parquet file.
@@ -399,29 +369,27 @@ class Builder:
                 "id": pa.array(_col("id"), type=pa.string()),
                 "size": pa.array(_col("size"), type=pa.int64()),
                 "content_size": pa.array(_col("content_size"), type=pa.int64()),
-                "retrieval_key": pa.array(_col("retrieval_key"), type=pa.string()),
+                "checksum": pa.array(_col("checksum"), type=pa.string()),
                 "text": pa.array(_col("text"), type=pa.string()),
                 "data": pa.array(_col("data"), type=pa.binary()),
-                "uri": pa.array(_col("uri"), type=pa.string()),
-                "offset": pa.array(_col("offset"), type=pa.int64()),
-                "length": pa.array(_col("length"), type=pa.int64()),
+                "resolve": pa.array(_col("resolve"), type=pa.string()),
+                "base_resolve": pa.array(_col("base_resolve"), type=pa.string()),
                 "media_type": pa.array(_col("media_type"), type=pa.string()),
                 "source": pa.array(_col("source"), type=pa.string()),
-                "checksum": pa.array(_col("checksum"), type=pa.string()),
-                "base_uri": pa.array(_col("base_uri"), type=pa.string()),
                 "metadata": pa.array(_col("metadata"), type=pa.string()),
                 "addressing": pa.array(
-                    [r.addressing for r in rows], type=pa.list_(pa.string())
+                    [r.addressing for r in rows], type=pa.string()
                 ),
             }
         )
 
         # File-level metadata
         file_meta: dict[bytes, bytes] = {
-            b"zmp_version": json.dumps("0.1.0").encode(),
+            b"zmp_version": json.dumps("0.2.0").encode(),
             b"zarr_format": json.dumps(self._zarr_format).encode(),
-            b"retrieval_scheme": json.dumps(self._retrieval_scheme).encode(),
         }
+        if self._base_resolve is not None:
+            file_meta[b"base_resolve"] = json.dumps(self._base_resolve).encode()
         for k, v in self._metadata.items():
             file_meta[k.encode()] = v.encode() if isinstance(v, str) else json.dumps(v).encode()
 

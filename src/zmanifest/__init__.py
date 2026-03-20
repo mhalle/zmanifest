@@ -3,35 +3,30 @@ from .builder import Builder, canonical_json, git_blob_hash
 from .convert import dehydrate, hash, hydrate
 from .manifest import Manifest, ManifestEntry
 from .resolve import (
-    MountOpener,
-    base_uri_from_source,
-    fetch_uri,
-    is_relative_uri,
+    Resolver,
+    merge_base_resolve,
+    get_base_resolve,
     resolve_entry,
-    resolve_uri,
 )
-from .resolver import BlobResolver, FileResolver, GitResolver, HTTPResolver, TemplateResolver
+from .resolver import DicomWebResolver, FileResolver, GitResolver, HttpResolver
 
 __all__ = [
     "Addressing",
-    "BlobResolver",
     "Builder",
+    "DicomWebResolver",
     "FileResolver",
     "GitResolver",
-    "canonical_json",
-    "git_blob_hash",
-    "HTTPResolver",
+    "HttpResolver",
     "Manifest",
     "ManifestEntry",
     "ManifestMetadata",
-    "MountOpener",
-    "TemplateResolver",
-    "base_uri_from_source",
+    "Resolver",
+    "canonical_json",
     "dehydrate",
-    "fetch_uri",
+    "get_base_resolve",
+    "git_blob_hash",
     "hash",
     "hydrate",
-    "is_relative_uri",
+    "merge_base_resolve",
     "resolve_entry",
-    "resolve_uri",
 ]

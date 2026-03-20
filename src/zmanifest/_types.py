@@ -16,22 +16,25 @@ def compute_addressing(
     *,
     text: str | None = None,
     data: bytes | None = None,
-    retrieval_key: str | None = None,
-    uri: str | None = None,
+    resolve: dict | str | None = None,
     is_link: bool = False,
-) -> list[Addressing]:
-    """Compute addressing flags from populated fields."""
-    flags: list[Addressing] = []
+    is_mount: bool = False,
+    is_index: bool = False,
+) -> str:
+    """Compute addressing flags string from populated fields."""
+    flags = ""
     if text is not None:
-        flags.append(Addressing.TEXT)
+        flags += Addressing.TEXT
     if data is not None:
-        flags.append(Addressing.DATA)
-    if retrieval_key is not None:
-        flags.append(Addressing.KEY)
-    if uri is not None and not is_link:
-        flags.append(Addressing.URI)
+        flags += Addressing.DATA
+    if resolve is not None and not is_link:
+        flags += Addressing.RESOLVE
     if is_link:
-        flags.append(Addressing.LINK)
+        flags += Addressing.LINK
+    if is_mount:
+        flags += Addressing.MOUNT
+    if is_index:
+        flags += Addressing.INDEX
     return flags
 
 
@@ -40,8 +43,7 @@ class Addressing(enum.StrEnum):
 
     TEXT = "T"
     DATA = "D"
-    KEY = "K"
-    URI = "U"
+    RESOLVE = "R"
     LINK = "L"
     MOUNT = "M"
     INDEX = "I"
