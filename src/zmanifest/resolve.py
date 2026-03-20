@@ -10,9 +10,16 @@ from .manifest import Manifest, ManifestEntry
 
 @runtime_checkable
 class Resolver(Protocol):
-    """Protocol for scheme-specific content resolvers."""
+    """Protocol for scheme-specific content resolvers.
 
-    async def resolve(self, params: dict, base: dict | None = None) -> bytes | None: ...
+    Args:
+        params: Scheme-specific params from the entry's resolve dict.
+        bases: Chain of base_resolve dicts for this scheme, ordered
+            from outermost (file-level) to innermost (nearest parent).
+            The resolver merges them however makes sense for the scheme.
+    """
+
+    async def resolve(self, params: dict, bases: list[dict] | None = None) -> bytes | None: ...
 
 
 def _extract_multipart_frame(body: bytes, content_type: str) -> bytes | None:
@@ -37,45 +44,49 @@ def _extract_multipart_frame(body: bytes, content_type: str) -> bytes | None:
     return None
 
 
-def merge_base_resolve(
-    base: dict | None,
-    override: dict | None,
-) -> dict | None:
-    """Shallow merge of base_resolve dicts. Override replaces base per scheme."""
-    if base is None:
-        return override
-    if override is None:
-        return base
-    merged = dict(base)
-    merged.update(override)
-    return merged
-
-
-def get_base_resolve(
-    manifest: Manifest,
-    entry: ManifestEntry | None = None,
-) -> dict | None:
-    """Get the effective base_resolve for an entry.
-
-    Merges file-level base_resolve with the entry's own base_resolve.
-    """
-    # File-level base_resolve from parquet metadata
+def get_file_base_resolve(manifest: Manifest) -> dict | None:
+    """Get the file-level base_resolve from parquet metadata."""
     extra = manifest.metadata.get("extra", {})
-    file_base_str = extra.get("base_resolve") if extra else None
-    file_base = json.loads(file_base_str) if isinstance(file_base_str, str) else file_base_str
+    raw = extra.get("base_resolve") if extra else None
+    if raw is None:
+        return None
+    return json.loads(raw) if isinstance(raw, str) else raw
 
-    if entry is None or entry.base_resolve is None:
-        return file_base
 
-    entry_base = json.loads(entry.base_resolve) if isinstance(entry.base_resolve, str) else entry.base_resolve
-    return merge_base_resolve(file_base, entry_base)
+def build_base_chain(
+    *layers: dict | str | None,
+) -> list[dict]:
+    """Build the base_resolve chain from outermost to innermost.
+
+    Each layer is a base_resolve dict (or JSON string, or None).
+    None layers are skipped.
+    """
+    chain: list[dict] = []
+    for layer in layers:
+        if layer is None:
+            continue
+        if isinstance(layer, str):
+            layer = json.loads(layer)
+        chain.append(layer)
+    return chain
+
+
+def _collect_scheme_bases(scheme: str, base_chain: list[dict] | None) -> list[dict]:
+    """Extract per-scheme base dicts from the chain."""
+    if not base_chain:
+        return []
+    bases = []
+    for layer in base_chain:
+        if scheme in layer:
+            bases.append(layer[scheme])
+    return bases
 
 
 async def resolve_entry(
     entry: ManifestEntry,
     manifest: Manifest,
     resolvers: dict[str, Resolver] | None = None,
-    base_resolve: dict | None = None,
+    base_resolve: list[dict] | None = None,
     _visited: set[str] | None = None,
 ) -> bytes | None:
     """Resolve content for a manifest entry.
@@ -90,7 +101,7 @@ async def resolve_entry(
         entry: The manifest entry to resolve.
         manifest: The manifest containing the entry.
         resolvers: Dict of scheme name -> Resolver instance.
-        base_resolve: Base resolution params (merged file + parent).
+        base_resolve: Chain of base_resolve dicts, outermost to innermost.
         _visited: Set of visited paths for cycle detection (internal).
     """
     from ._types import Addressing
@@ -121,12 +132,13 @@ async def resolve_entry(
             _visited.add(entry.path)
             target_entry = manifest.get_entry(path_params["target"])
             if target_entry is not None:
-                target_base = merge_base_resolve(
-                    base_resolve,
-                    json.loads(target_entry.base_resolve) if target_entry.base_resolve else None,
-                )
+                # Extend chain with target's base_resolve if present
+                target_chain = list(base_resolve or [])
+                if target_entry.base_resolve:
+                    target_br = json.loads(target_entry.base_resolve) if isinstance(target_entry.base_resolve, str) else target_entry.base_resolve
+                    target_chain.append(target_br)
                 return await resolve_entry(
-                    target_entry, manifest, resolvers, target_base, _visited,
+                    target_entry, manifest, resolvers, target_chain or None, _visited,
                 )
 
     # 4. Resolve — try each scheme
@@ -138,8 +150,9 @@ async def resolve_entry(
             resolver = resolvers.get(scheme)
             if resolver is None:
                 continue
-            scheme_base = base_resolve.get(scheme) if base_resolve else None
-            result = await resolver.resolve(params, scheme_base)
+            # Collect the base chain for this scheme
+            scheme_bases = _collect_scheme_bases(scheme, base_resolve)
+            result = await resolver.resolve(params, scheme_bases or None)
             if result is not None:
                 return result
 

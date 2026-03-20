@@ -36,21 +36,23 @@ class HttpResolver:
     Base params: url (base URL for relative resolution)
     """
 
-    async def resolve(self, params: dict, base: dict | None = None) -> bytes | None:
+    async def resolve(self, params: dict, bases: list[dict] | None = None) -> bytes | None:
         from .resolve import _extract_multipart_frame
 
         url = params.get("url")
         if url is None:
             return None
 
-        # Resolve relative URL against base
-        if base and "url" in base:
-            base_url = base["url"]
-            if "://" not in url and not url.startswith("/"):
-                if base_url.startswith(("http://", "https://")):
-                    url = urljoin(base_url, url)
-                else:
-                    url = os.path.normpath(os.path.join(base_url, url))
+        # Resolve relative URL against nearest base with a url key
+        if bases and "://" not in url and not url.startswith("/"):
+            for base in reversed(bases):  # innermost first
+                if "url" in base:
+                    base_url = base["url"]
+                    if base_url.startswith(("http://", "https://")):
+                        url = urljoin(base_url, url)
+                    else:
+                        url = os.path.normpath(os.path.join(base_url, url))
+                    break
 
         # Local file path
         if not url.startswith(("http://", "https://")):
@@ -108,8 +110,16 @@ class GitResolver:
             self._stores[repo_path] = _GitStore.open(repo_path, create=False)
         return self._stores[repo_path]
 
-    async def resolve(self, params: dict, base: dict | None = None) -> bytes | None:
-        repo = params.get("repo") or (base or {}).get("repo") or self._default_repo
+    async def resolve(self, params: dict, bases: list[dict] | None = None) -> bytes | None:
+        # Accumulate base chain: repo and ref from nearest ancestor
+        repo = params.get("repo") or self._default_repo
+        ref = params.get("ref")
+        if bases:
+            for base in reversed(bases):
+                if repo is None or repo == self._default_repo:
+                    repo = base.get("repo", repo)
+                if ref is None:
+                    ref = base.get("ref")
         if repo is None:
             return None
 
@@ -127,7 +137,7 @@ class GitResolver:
         # By ref + path
         path = params.get("path")
         if path is not None:
-            ref = params.get("ref") or (base or {}).get("ref", "HEAD")
+            ref = ref or "HEAD"
             if repo.startswith(("http://", "https://")):
                 return await self._resolve_remote_path(repo, ref, path, params)
 
@@ -161,10 +171,15 @@ class DicomWebResolver:
     def __init__(self, headers: dict[str, str] | None = None) -> None:
         self._headers = headers or {}
 
-    async def resolve(self, params: dict, base: dict | None = None) -> bytes | None:
+    async def resolve(self, params: dict, bases: list[dict] | None = None) -> bytes | None:
         from .resolve import _extract_multipart_frame
 
-        service_url = params.get("url") or (base or {}).get("url")
+        service_url = params.get("url")
+        if service_url is None and bases:
+            for base in reversed(bases):
+                if "url" in base:
+                    service_url = base["url"]
+                    break
         if service_url is None:
             return None
 

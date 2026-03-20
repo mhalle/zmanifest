@@ -4,8 +4,8 @@ from .convert import dehydrate, hash, hydrate
 from .manifest import Manifest, ManifestEntry
 from .resolve import (
     Resolver,
-    merge_base_resolve,
-    get_base_resolve,
+    build_base_chain,
+    get_file_base_resolve,
     resolve_entry,
 )
 from .resolver import DicomWebResolver, FileResolver, GitResolver, HttpResolver
@@ -23,10 +23,10 @@ __all__ = [
     "Resolver",
     "canonical_json",
     "dehydrate",
-    "get_base_resolve",
+    "get_file_base_resolve",
     "git_blob_hash",
     "hash",
     "hydrate",
-    "merge_base_resolve",
+    "build_base_chain",
     "resolve_entry",
 ]
