@@ -390,10 +390,15 @@ class Builder:
         if not has_root:
             self._rows.append(_Row(path="", size=0))
 
-        # Sort: non-data rows first (by path), then data rows (by path)
-        non_data = sorted([r for r in self._rows if r.data is None], key=lambda r: r.path)
+        # Data rows first (one per row group), then non-data rows in the
+        # final row group with the index row last.
         data_rows = sorted([r for r in self._rows if r.data is not None], key=lambda r: r.path)
-        rows = non_data + data_rows
+        non_data_no_root = sorted(
+            [r for r in self._rows if r.data is None and r.path != ""],
+            key=lambda r: r.path,
+        )
+        root_rows = [r for r in self._rows if r.path == ""]
+        rows = data_rows + non_data_no_root + root_rows
 
         # Build index: lightweight fields + row number for every non-root row.
         # The index is stored in the root row's text field with addressing [I].
@@ -502,8 +507,8 @@ class Builder:
             use_dictionary=use_dictionary,
         )
         try:
-            n_non_data = len(non_data)
             n_data = len(data_rows)
+            n_tail = len(non_data_no_root) + len(root_rows)
 
             if self._max_rows_per_group is not None:
                 # User override: uniform row group sizing
@@ -515,13 +520,14 @@ class Builder:
                     writer.write_table(table.slice(i, end - i))
                     i = end
             else:
-                # Non-data rows (index + text + refs + mounts + links)
-                # always go in the first row group together
-                if n_non_data > 0:
-                    writer.write_table(table.slice(0, n_non_data))
-                # Data rows: one row per group for lazy access
+                # Data rows first: one row per group for lazy access
                 for i in range(n_data):
-                    writer.write_table(table.slice(n_non_data + i, 1))
+                    writer.write_table(table.slice(i, 1))
+                # Non-data rows (text + refs + mounts + links + index)
+                # in the final row group
+                n_tail = len(non_data_no_root) + len(root_rows)
+                if n_tail > 0:
+                    writer.write_table(table.slice(n_data, n_tail))
         finally:
             writer.close()
 

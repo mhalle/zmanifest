@@ -97,57 +97,74 @@ class Manifest:
         """
         from ._types import Addressing
 
-        # Read just the first row group's addressing and text columns
+        # Read the last row group — it contains all non-data rows + the index
+        num_rgs = self._pf.metadata.num_row_groups
+        if num_rgs == 0:
+            return False
+
+        last_rg_idx = num_rgs - 1
         try:
-            row0 = self._pf.read_row_groups([0], columns=["path", "addressing", "text", "metadata"])
+            last_rg = self._pf.read_row_groups(
+                [last_rg_idx], columns=["path", "addressing", "text", "metadata"],
+            )
         except Exception:
             return False
 
-        if len(row0) == 0:
+        if len(last_rg) == 0:
             return False
 
-        path0 = row0.column("path")[0].as_py()
-        addr0 = row0.column("addressing")[0].as_py()
-        if path0 != "" or addr0 is None or Addressing.INDEX not in addr0:
+        # The index row is the last row in the last row group
+        last_row = len(last_rg) - 1
+        path_last = last_rg.column("path")[last_row].as_py()
+        addr_last = last_rg.column("addressing")[last_row].as_py()
+        if path_last != "" or addr_last is None or Addressing.INDEX not in addr_last:
             return False
 
-        text0 = row0.column("text")[0].as_py()
-        if text0 is None:
+        text_last = last_rg.column("text")[last_row].as_py()
+        if text_last is None:
             return False
 
         try:
-            index_data = json.loads(text0)
+            index_data = json.loads(text_last)
         except (json.JSONDecodeError, TypeError):
             return False
 
         # Store the root row's metadata
-        self._root_metadata_raw = row0.column("metadata")[0].as_py()
+        self._root_metadata_raw = last_rg.column("metadata")[last_row].as_py()
 
-        # Build a lookup from row group 0 for text and metadata by path
-        rg0_text: dict[str, str | None] = {}
-        rg0_metadata: dict[str, str | None] = {}
-        for i in range(len(row0)):
-            p = row0.column("path")[i].as_py()
-            rg0_text[p] = row0.column("text")[i].as_py()
-            rg0_metadata[p] = row0.column("metadata")[i].as_py()
+        # Build a lookup from the last row group for text and metadata by path
+        rg_text: dict[str, str | None] = {}
+        rg_metadata: dict[str, str | None] = {}
+        for i in range(len(last_rg)):
+            p = last_rg.column("path")[i].as_py()
+            rg_text[p] = last_rg.column("text")[i].as_py()
+            rg_metadata[p] = last_rg.column("metadata")[i].as_py()
+
+        # Compute the absolute row offset of the last row group
+        rg_row_offset = 0
+        for rg_i in range(last_rg_idx):
+            rg_row_offset += self._pf.metadata.row_group(rg_i).num_rows
 
         # Build entries and indexes from the index JSON
         self._indexed_entries: dict[str, ManifestEntry] = {}
         self._indexed_row_map: dict[str, int] = {}  # path -> parquet row number
         self._indexed_metadata: dict[int, str] = {}  # row number -> metadata JSON
-        self._index: dict[str, int] = {"": 0}  # root row
+        # Root row is the last row in the file
+        root_row_num = rg_row_offset + last_row
+        self._index: dict[str, int] = {}
         self._id_index: dict[str, int] = {}
+        self._indexed_metadata: dict[int, str] = {}
         self._table = None
         self._data_table = None
 
         # Root row metadata
         if self._root_metadata_raw is not None:
-            self._indexed_metadata[0] = self._root_metadata_raw
+            self._indexed_metadata[root_row_num] = self._root_metadata_raw
 
         for entry_dict in index_data:
             path = entry_dict["path"]
-            # Text comes from row group 0 (all non-data rows are there)
-            text_val = rg0_text.get(path)
+            # Text comes from the last row group (all non-data rows are there)
+            text_val = rg_text.get(path)
             entry = ManifestEntry(
                 path=path,
                 size=entry_dict.get("size", 0),
@@ -168,13 +185,15 @@ class Manifest:
             self._indexed_entries[path] = entry
             self._indexed_row_map[path] = row_num
             self._index[path] = row_num
-            meta_raw = entry_dict.get("metadata") or rg0_metadata.get(path)
+            meta_raw = entry_dict.get("metadata") or rg_metadata.get(path)
             if meta_raw is not None:
                 self._indexed_metadata[row_num] = meta_raw
             eid = entry_dict.get("id")
             if eid is not None:
                 self._id_index[eid] = row_num
 
+        # Root/index row last in iteration order
+        self._index[""] = root_row_num
         return True
 
     def _parse_metadata(self) -> ManifestMetadata:
