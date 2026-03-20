@@ -123,6 +123,14 @@ class Manifest:
         # Store the root row's metadata
         self._root_metadata_raw = row0.column("metadata")[0].as_py()
 
+        # Build a lookup from row group 0 for text and metadata by path
+        rg0_text: dict[str, str | None] = {}
+        rg0_metadata: dict[str, str | None] = {}
+        for i in range(len(row0)):
+            p = row0.column("path")[i].as_py()
+            rg0_text[p] = row0.column("text")[i].as_py()
+            rg0_metadata[p] = row0.column("metadata")[i].as_py()
+
         # Build entries and indexes from the index JSON
         self._indexed_entries: dict[str, ManifestEntry] = {}
         self._indexed_row_map: dict[str, int] = {}  # path -> parquet row number
@@ -138,13 +146,15 @@ class Manifest:
 
         for entry_dict in index_data:
             path = entry_dict["path"]
+            # Text comes from row group 0 (all non-data rows are there)
+            text_val = rg0_text.get(path)
             entry = ManifestEntry(
                 path=path,
                 size=entry_dict.get("size", 0),
                 addressing=entry_dict.get("addressing", []),
                 content_size=entry_dict.get("content_size"),
                 retrieval_key=entry_dict.get("retrieval_key"),
-                text=entry_dict.get("text"),
+                text=text_val,
                 uri=entry_dict.get("uri"),
                 offset=entry_dict.get("offset"),
                 length=entry_dict.get("length"),
@@ -158,7 +168,7 @@ class Manifest:
             self._indexed_entries[path] = entry
             self._indexed_row_map[path] = row_num
             self._index[path] = row_num
-            meta_raw = entry_dict.get("metadata")
+            meta_raw = entry_dict.get("metadata") or rg0_metadata.get(path)
             if meta_raw is not None:
                 self._indexed_metadata[row_num] = meta_raw
             eid = entry_dict.get("id")
