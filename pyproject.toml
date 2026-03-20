@@ -1,6 +1,6 @@
 [project]
 name = "zmanifest"
-version = "0.8.0"
+version = "0.9.0"
 description = "ZMP (Manifest Parquet) — content-addressed file manifest format"
 readme = "README.md"
 authors = [
