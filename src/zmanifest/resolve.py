@@ -57,16 +57,27 @@ def _get_http_client() -> Any:
 
 
 def _extract_multipart_frame(body: bytes, content_type: str) -> bytes | None:
-    """Extract the octet-stream part from a multipart/related response."""
+    """Extract the octet-stream part from a multipart/related response.
+
+    Uses find-based scanning to avoid copying the body.
+    """
     try:
         boundary = content_type.split("boundary=")[1].split(";")[0].strip()
     except IndexError:
         return body
-    parts = body.split(f"--{boundary}".encode())
-    for part in parts:
-        header_end = part.find(b"\r\n\r\n")
-        if header_end > 0 and b"octet-stream" in part[:header_end]:
-            return part[header_end + 4:].rstrip(b"\r\n")
+    marker = f"--{boundary}".encode()
+    pos = body.find(marker)
+    while pos >= 0:
+        header_start = pos + len(marker)
+        header_end = body.find(b"\r\n\r\n", header_start)
+        if header_end > 0 and b"octet-stream" in body[header_start:header_end]:
+            data_start = header_end + 4
+            next_boundary = body.find(marker, data_start)
+            end = next_boundary if next_boundary >= 0 else len(body)
+            while end > data_start and body[end - 1] in (13, 10):  # \r \n
+                end -= 1
+            return body[data_start:end]
+        pos = body.find(marker, header_start)
     return None
 
 
