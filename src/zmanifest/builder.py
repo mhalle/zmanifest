@@ -520,14 +520,16 @@ class Builder:
                     writer.write_table(table.slice(i, end - i))
                     i = end
             else:
-                # Data rows first: one row per group for lazy access
+                # Data rows: one per group
                 for i in range(n_data):
                     writer.write_table(table.slice(i, 1))
-                # Non-data rows (text + refs + mounts + links + index)
-                # in the final row group
-                n_tail = len(non_data_no_root) + len(root_rows)
-                if n_tail > 0:
-                    writer.write_table(table.slice(n_data, n_tail))
+                # Non-data rows (text + refs + mounts + links)
+                n_non_data = len(non_data_no_root)
+                if n_non_data > 0:
+                    writer.write_table(table.slice(n_data, n_non_data))
+                # Index row alone in the very last group
+                if root_rows:
+                    writer.write_table(table.slice(n_data + n_non_data, 1))
         finally:
             writer.close()
 

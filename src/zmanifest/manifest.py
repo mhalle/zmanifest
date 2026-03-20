@@ -97,63 +97,69 @@ class Manifest:
         """
         from ._types import Addressing
 
-        # Read the last row group — it contains all non-data rows + the index
+        # The last row group contains just the index row.
+        # The second-to-last row group contains non-data rows (text, refs, etc).
         num_rgs = self._pf.metadata.num_row_groups
         if num_rgs == 0:
             return False
 
+        # Read the last row group (index row only)
         last_rg_idx = num_rgs - 1
         try:
-            last_rg = self._pf.read_row_groups(
+            index_rg = self._pf.read_row_groups(
                 [last_rg_idx], columns=["path", "addressing", "text", "metadata"],
             )
         except Exception:
             return False
 
-        if len(last_rg) == 0:
+        if len(index_rg) != 1:
             return False
 
-        # The index row is the last row in the last row group
-        last_row = len(last_rg) - 1
-        path_last = last_rg.column("path")[last_row].as_py()
-        addr_last = last_rg.column("addressing")[last_row].as_py()
-        if path_last != "" or addr_last is None or Addressing.INDEX not in addr_last:
+        path_idx = index_rg.column("path")[0].as_py()
+        addr_idx = index_rg.column("addressing")[0].as_py()
+        if path_idx != "" or addr_idx is None or Addressing.INDEX not in addr_idx:
             return False
 
-        text_last = last_rg.column("text")[last_row].as_py()
-        if text_last is None:
+        index_text = index_rg.column("text")[0].as_py()
+        if index_text is None:
             return False
 
         try:
-            index_data = json.loads(text_last)
+            index_data = json.loads(index_text)
         except (json.JSONDecodeError, TypeError):
             return False
 
         # Store the root row's metadata
-        self._root_metadata_raw = last_rg.column("metadata")[last_row].as_py()
+        self._root_metadata_raw = index_rg.column("metadata")[0].as_py()
 
-        # Build a lookup from the last row group for text and metadata by path
+        # Read the second-to-last row group for text and metadata content
         rg_text: dict[str, str | None] = {}
         rg_metadata: dict[str, str | None] = {}
-        for i in range(len(last_rg)):
-            p = last_rg.column("path")[i].as_py()
-            rg_text[p] = last_rg.column("text")[i].as_py()
-            rg_metadata[p] = last_rg.column("metadata")[i].as_py()
+        if num_rgs >= 2:
+            non_data_rg_idx = num_rgs - 2
+            try:
+                non_data_rg = self._pf.read_row_groups(
+                    [non_data_rg_idx], columns=["path", "text", "metadata"],
+                )
+                for i in range(len(non_data_rg)):
+                    p = non_data_rg.column("path")[i].as_py()
+                    rg_text[p] = non_data_rg.column("text")[i].as_py()
+                    rg_metadata[p] = non_data_rg.column("metadata")[i].as_py()
+            except Exception:
+                pass
 
-        # Compute the absolute row offset of the last row group
-        rg_row_offset = 0
-        for rg_i in range(last_rg_idx):
-            rg_row_offset += self._pf.metadata.row_group(rg_i).num_rows
+        # Compute the absolute row number of the index row
+        total_rows = sum(
+            self._pf.metadata.row_group(i).num_rows for i in range(num_rgs)
+        )
+        root_row_num = total_rows - 1
 
         # Build entries and indexes from the index JSON
         self._indexed_entries: dict[str, ManifestEntry] = {}
         self._indexed_row_map: dict[str, int] = {}  # path -> parquet row number
         self._indexed_metadata: dict[int, str] = {}  # row number -> metadata JSON
-        # Root row is the last row in the file
-        root_row_num = rg_row_offset + last_row
         self._index: dict[str, int] = {}
         self._id_index: dict[str, int] = {}
-        self._indexed_metadata: dict[int, str] = {}
         self._table = None
         self._data_table = None
 
@@ -163,7 +169,7 @@ class Manifest:
 
         for entry_dict in index_data:
             path = entry_dict["path"]
-            # Text comes from the last row group (all non-data rows are there)
+            # Text comes from the non-data row group
             text_val = rg_text.get(path)
             entry = ManifestEntry(
                 path=path,
