@@ -514,22 +514,14 @@ class Builder:
                     end = min(i + max_rg, n)
                     writer.write_table(table.slice(i, end - i))
                     i = end
-            elif n_data > 0:
-                # Has inline data: non-data rows in one group, then
-                # each data row in its own group
+            else:
+                # Non-data rows (index + text + refs + mounts + links)
+                # always go in the first row group together
                 if n_non_data > 0:
                     writer.write_table(table.slice(0, n_non_data))
+                # Data rows: one row per group for lazy access
                 for i in range(n_data):
                     writer.write_table(table.slice(n_non_data + i, 1))
-            else:
-                # Reference-only: ~16 groups
-                max_rg = max(1, math.ceil(len(table) / 16))
-                n = len(table)
-                i = 0
-                while i < n:
-                    end = min(i + max_rg, n)
-                    writer.write_table(table.slice(i, end - i))
-                    i = end
         finally:
             writer.close()
 
