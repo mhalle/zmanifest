@@ -45,9 +45,14 @@ class Manifest:
     read on demand per-row to avoid loading large binary blobs into memory.
     """
 
-    def __init__(self, path: str, *, eager_data: bool | None = None) -> None:
-        self._pf = pq.ParquetFile(path)
-        self._path = path
+    def __init__(self, source: str | bytes, *, eager_data: bool | None = None) -> None:
+        import io
+        if isinstance(source, bytes):
+            self._pf = pq.ParquetFile(io.BytesIO(source))
+            self._path = None
+        else:
+            self._pf = pq.ParquetFile(source)
+            self._path = source
         self._metadata = self._parse_metadata()
 
         all_columns = self._pf.schema_arrow.names
