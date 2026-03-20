@@ -57,30 +57,17 @@ def _get_http_client() -> Any:
 
 
 def _extract_multipart_frame(body: bytes, content_type: str) -> bytes | None:
-    """Extract the first data part from a multipart/related response."""
-    boundary = None
-    for part in content_type.split(";"):
-        part = part.strip()
-        if part.startswith("boundary="):
-            boundary = part[len("boundary="):].strip().encode()
-            break
-    if boundary is None:
-        return body  # can't parse, return raw
-
-    delimiter = b"--" + boundary
-    parts = body.split(delimiter)
-
+    """Extract the octet-stream part from a multipart/related response."""
+    try:
+        boundary = content_type.split("boundary=")[1].split(";")[0].strip()
+    except IndexError:
+        return body
+    parts = body.split(f"--{boundary}".encode())
     for part in parts:
-        stripped = part.strip()
-        if not stripped or stripped == b"--":
-            continue
-        for sep in (b"\r\n\r\n", b"\n\n"):
-            if sep in part:
-                _, frame_data = part.split(sep, 1)
-                frame_data = frame_data.rstrip(b"\r\n")
-                if len(frame_data) > 0:
-                    return frame_data
-    return body  # fallback to raw
+        header_end = part.find(b"\r\n\r\n")
+        if header_end > 0 and b"octet-stream" in part[:header_end]:
+            return part[header_end + 4:].rstrip(b"\r\n")
+    return None
 
 
 async def fetch_uri(uri: str, offset: int | None, length: int | None) -> bytes | None:
