@@ -56,6 +56,33 @@ def _get_http_client() -> Any:
     return _http_client
 
 
+def _extract_multipart_frame(body: bytes, content_type: str) -> bytes | None:
+    """Extract the first data part from a multipart/related response."""
+    boundary = None
+    for part in content_type.split(";"):
+        part = part.strip()
+        if part.startswith("boundary="):
+            boundary = part[len("boundary="):].strip().encode()
+            break
+    if boundary is None:
+        return body  # can't parse, return raw
+
+    delimiter = b"--" + boundary
+    parts = body.split(delimiter)
+
+    for part in parts:
+        stripped = part.strip()
+        if not stripped or stripped == b"--":
+            continue
+        for sep in (b"\r\n\r\n", b"\n\n"):
+            if sep in part:
+                _, frame_data = part.split(sep, 1)
+                frame_data = frame_data.rstrip(b"\r\n")
+                if len(frame_data) > 0:
+                    return frame_data
+    return body  # fallback to raw
+
+
 async def fetch_uri(uri: str, offset: int | None, length: int | None) -> bytes | None:
     """Fetch bytes from a local path or HTTP(S) URL with optional byte range."""
     if uri.startswith(("http://", "https://")):
@@ -66,6 +93,9 @@ async def fetch_uri(uri: str, offset: int | None, length: int | None) -> bytes |
         else:
             resp = await client.get(uri)
         if resp.status_code in (200, 206):
+            ct = resp.headers.get("content-type", "")
+            if "multipart/related" in ct:
+                return _extract_multipart_frame(resp.content, ct)
             return resp.content
         return None
     else:
