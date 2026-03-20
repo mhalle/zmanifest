@@ -44,3 +44,4 @@ class Addressing(enum.StrEnum):
     URI = "U"
     LINK = "L"
     MOUNT = "M"
+    INDEX = "I"

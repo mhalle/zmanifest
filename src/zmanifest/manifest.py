@@ -49,15 +49,17 @@ class Manifest:
     def __init__(self, path: str, *, eager_data: bool | None = None) -> None:
         self._pf = pq.ParquetFile(path)
         self._path = path
+        self._metadata = self._parse_metadata()
 
         all_columns = self._pf.schema_arrow.names
         self._has_data_column = "data" in all_columns
 
-        # Decide whether to eagerly load the data column.
-        # Default: eager if file is < 256 MB, lazy otherwise.
+        # Try fast path: load index from root row (row 0)
+        if self._try_load_index():
+            return
+
+        # Fallback: eager load of all non-data columns
         if eager_data is None:
-            file_size = self._pf.metadata.serialized_size
-            # serialized_size may undercount; use row group sizes as proxy
             total = sum(
                 self._pf.metadata.row_group(i).total_byte_size
                 for i in range(self._pf.metadata.num_row_groups)
@@ -65,11 +67,9 @@ class Manifest:
             eager_data = total < 256 * 1024 * 1024
 
         if eager_data and self._has_data_column:
-            # Load everything including data
             self._table = self._pf.read()
             self._data_table: pa.Table | None = self._table
         else:
-            # Load all columns except data
             load_columns = [c for c in all_columns if c != "data"]
             self._table = self._pf.read(columns=load_columns)
             self._data_table = None
@@ -89,8 +89,83 @@ class Manifest:
                 if val is not None:
                     self._id_index[val] = i
 
-        # Parse file-level metadata
-        self._metadata = self._parse_metadata()
+    def _try_load_index(self) -> bool:
+        """Try to load from the index row (row 0 with I flag).
+
+        Returns True if the index was loaded, False to fall back to
+        full table scan.
+        """
+        from ._types import Addressing
+
+        # Read just the first row group's addressing and text columns
+        try:
+            row0 = self._pf.read_row_groups([0], columns=["path", "addressing", "text", "metadata"])
+        except Exception:
+            return False
+
+        if len(row0) == 0:
+            return False
+
+        path0 = row0.column("path")[0].as_py()
+        addr0 = row0.column("addressing")[0].as_py()
+        if path0 != "" or addr0 is None or Addressing.INDEX not in addr0:
+            return False
+
+        text0 = row0.column("text")[0].as_py()
+        if text0 is None:
+            return False
+
+        try:
+            index_data = json.loads(text0)
+        except (json.JSONDecodeError, TypeError):
+            return False
+
+        # Store the root row's metadata
+        self._root_metadata_raw = row0.column("metadata")[0].as_py()
+
+        # Build entries and indexes from the index JSON
+        self._indexed_entries: dict[str, ManifestEntry] = {}
+        self._indexed_row_map: dict[str, int] = {}  # path -> parquet row number
+        self._indexed_metadata: dict[int, str] = {}  # row number -> metadata JSON
+        self._index: dict[str, int] = {"": 0}  # root row
+        self._id_index: dict[str, int] = {}
+        self._table = None
+        self._data_table = None
+
+        # Root row metadata
+        if self._root_metadata_raw is not None:
+            self._indexed_metadata[0] = self._root_metadata_raw
+
+        for entry_dict in index_data:
+            path = entry_dict["path"]
+            entry = ManifestEntry(
+                path=path,
+                size=entry_dict.get("size", 0),
+                addressing=entry_dict.get("addressing", []),
+                content_size=entry_dict.get("content_size"),
+                retrieval_key=entry_dict.get("retrieval_key"),
+                text=entry_dict.get("text"),
+                uri=entry_dict.get("uri"),
+                offset=entry_dict.get("offset"),
+                length=entry_dict.get("length"),
+                array_path=entry_dict.get("array_path"),
+                chunk_key=entry_dict.get("chunk_key"),
+                media_type=entry_dict.get("media_type"),
+                source=entry_dict.get("source"),
+                base_uri=entry_dict.get("base_uri"),
+            )
+            row_num = entry_dict["row"]
+            self._indexed_entries[path] = entry
+            self._indexed_row_map[path] = row_num
+            self._index[path] = row_num
+            meta_raw = entry_dict.get("metadata")
+            if meta_raw is not None:
+                self._indexed_metadata[row_num] = meta_raw
+            eid = entry_dict.get("id")
+            if eid is not None:
+                self._id_index[eid] = row_num
+
+        return True
 
     def _parse_metadata(self) -> ManifestMetadata:
         kv = self._pf.schema_arrow.metadata or {}
@@ -176,7 +251,12 @@ class Manifest:
         return self._row_metadata(idx)
 
     def _row_metadata(self, idx: int) -> dict[str, Any] | None:
-        raw = _scalar(self._table, "metadata", idx)
+        raw: str | None = None
+        if self._table is None:
+            # Index path
+            raw = self._indexed_metadata.get(idx)
+        else:
+            raw = _scalar(self._table, "metadata", idx)
         if raw is None:
             return None
         try:
@@ -212,6 +292,12 @@ class Manifest:
         idx = self._id_index.get(id)
         if idx is None:
             return None
+        if hasattr(self, "_indexed_entries"):
+            # Find by row number
+            for path, row_num in self._indexed_row_map.items():
+                if row_num == idx:
+                    return self._indexed_entries[path]
+            return None
         return self._entry_at(idx)
 
     def has(self, path: str) -> bool:
@@ -222,6 +308,8 @@ class Manifest:
 
     def _entry_at(self, idx: int) -> ManifestEntry:
         t = self._table
+        if t is None:
+            raise RuntimeError("No table loaded — use get_entry() for indexed manifests")
         addr = _scalar(t, "addressing", idx)
         return ManifestEntry(
             path=_scalar(t, "path", idx),
@@ -241,6 +329,9 @@ class Manifest:
         )
 
     def get_entry(self, path: str) -> ManifestEntry | None:
+        # Index fast path
+        if hasattr(self, "_indexed_entries"):
+            return self._indexed_entries.get(path)
         idx = self._index.get(path)
         if idx is None:
             return None

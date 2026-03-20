@@ -78,9 +78,12 @@ class _Row:
     metadata: str | None = None  # JSON string
     is_mount: bool = False
     is_link: bool = False
+    is_index: bool = False
 
     @property
     def addressing(self) -> list[str]:
+        if self.is_index:
+            return [Addressing.INDEX]
         flags = compute_addressing(
             text=self.text,
             data=self.data,
@@ -382,10 +385,63 @@ class Builder:
         """
         output = Path(output)
 
+        # Ensure a root row exists for the index
+        has_root = any(r.path == "" for r in self._rows)
+        if not has_root:
+            self._rows.append(_Row(path="", size=0))
+
         # Sort: non-data rows first (by path), then data rows (by path)
         non_data = sorted([r for r in self._rows if r.data is None], key=lambda r: r.path)
         data_rows = sorted([r for r in self._rows if r.data is not None], key=lambda r: r.path)
         rows = non_data + data_rows
+
+        # Build index: lightweight fields + row number for every non-root row.
+        # The index is stored in the root row's text field with addressing [I].
+        index_entries = []
+        for row_num, r in enumerate(rows):
+            if r.path == "":
+                continue
+            entry: dict[str, Any] = {"path": r.path, "row": row_num}
+            if r.size:
+                entry["size"] = r.size
+            if r.addressing:
+                entry["addressing"] = r.addressing
+            if r.id is not None:
+                entry["id"] = r.id
+            if r.content_size is not None:
+                entry["content_size"] = r.content_size
+            if r.retrieval_key is not None:
+                entry["retrieval_key"] = r.retrieval_key
+            if r.uri is not None:
+                entry["uri"] = r.uri
+            if r.offset is not None:
+                entry["offset"] = r.offset
+            if r.length is not None:
+                entry["length"] = r.length
+            if r.array_path is not None:
+                entry["array_path"] = r.array_path
+            if r.chunk_key is not None:
+                entry["chunk_key"] = r.chunk_key
+            if r.media_type is not None:
+                entry["media_type"] = r.media_type
+            if r.source is not None:
+                entry["source"] = r.source
+            if r.base_uri is not None:
+                entry["base_uri"] = r.base_uri
+            if r.checksum is not None:
+                entry["checksum"] = r.checksum
+            if r.metadata is not None:
+                entry["metadata"] = r.metadata
+            index_entries.append(entry)
+
+        index_json = json.dumps(index_entries, separators=(",", ":"))
+
+        # Inject index into the root row
+        for r in rows:
+            if r.path == "":
+                r.text = index_json
+                r.is_index = True
+                break
 
         # Build columns
         def _col(attr: str) -> list[Any]:
