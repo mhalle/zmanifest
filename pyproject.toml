@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 git = ["vost>=0.78.1"]
-http = ["httpx"]
+http = ["httpx[http2]"]
 test = ["pytest", "pytest-asyncio", "vost>=0.78.1"]
 
 [build-system]
