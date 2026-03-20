@@ -43,16 +43,31 @@ class HttpResolver:
         if url is None:
             return None
 
-        # Resolve relative URL against nearest base with a url key
-        if bases and "://" not in url and not url.startswith("/"):
-            for base in reversed(bases):  # innermost first
-                if "url" in base:
-                    base_url = base["url"]
-                    if base_url.startswith(("http://", "https://")):
-                        url = urljoin(base_url, url)
-                    else:
-                        url = os.path.normpath(os.path.join(base_url, url))
-                    break
+        # Compose the base chain: resolve each relative base against
+        # its parent, outermost first, then resolve the entry URL.
+        if bases:
+            # First, build the effective base URL by composing the chain
+            effective_base: str | None = None
+            for base in bases:  # outermost to innermost
+                base_url = base.get("url")
+                if base_url is None:
+                    continue
+                if effective_base is None or "://" in base_url or base_url.startswith("/"):
+                    effective_base = base_url
+                elif effective_base.startswith(("http://", "https://")):
+                    effective_base = urljoin(effective_base, base_url)
+                else:
+                    effective_base = os.path.normpath(os.path.join(effective_base, base_url))
+                # Ensure directory-like base ends with /
+                if not effective_base.endswith("/") and "." not in effective_base.rsplit("/", 1)[-1]:
+                    effective_base += "/"
+
+            # Then resolve the entry URL against the composed base
+            if effective_base and "://" not in url and not url.startswith("/"):
+                if effective_base.startswith(("http://", "https://")):
+                    url = urljoin(effective_base, url)
+                else:
+                    url = os.path.normpath(os.path.join(effective_base, url))
 
         # Local file path
         if not url.startswith(("http://", "https://")):
