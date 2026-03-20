@@ -49,7 +49,8 @@ class _Row:
     data: bytes | None = None
     resolve: str | None = None  # JSON string
     base_resolve: str | None = None  # JSON string
-    media_type: str | None = None
+    content_type: str | None = None
+    content_encoding: str | None = None
     source: str | None = None
     metadata: str | None = None  # JSON string
     is_mount: bool = False
@@ -177,7 +178,7 @@ class Builder:
         resolve: dict,
         *,
         id: str | None = None,
-        media_type: str | None = None,
+        content_type: str | None = None,
         base_resolve: dict | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
@@ -190,7 +191,7 @@ class Builder:
             path: Mount point path (trailing ``/`` added if missing).
             resolve: Resolution dict (e.g. ``{"http": {"url": "child.zmp"}}``).
             id: Optional short identifier.
-            media_type: MIME type hint.
+            content_type: MIME type hint.
             base_resolve: Default resolution params for entries within
                 the mounted store, keyed by scheme.
             metadata: Per-entry metadata dict.
@@ -205,7 +206,7 @@ class Builder:
             id=id,
             resolve=json.dumps(resolve, separators=(",", ":")),
             base_resolve=json.dumps(base_resolve, separators=(",", ":")) if base_resolve else None,
-            media_type=media_type,
+            content_type=content_type,
             metadata=self._encode_metadata(metadata),
             is_mount=True,
         ))
@@ -216,7 +217,7 @@ class Builder:
         target: str,
         *,
         id: str | None = None,
-        media_type: str | None = None,
+        content_type: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
         """Create a link entry that points to another path in the manifest.
@@ -228,7 +229,7 @@ class Builder:
             path: The link's path in the manifest.
             target: Path of the target entry (relative to manifest root).
             id: Optional short identifier.
-            media_type: MIME type hint.
+            content_type: MIME type hint.
             metadata: Per-entry metadata dict.
         """
         resolve_dict = {"_path": {"target": target}}
@@ -239,7 +240,7 @@ class Builder:
             size=0,
             id=id,
             resolve=json.dumps(resolve_dict, separators=(",", ":")),
-            media_type=media_type,
+            content_type=content_type,
             metadata=self._encode_metadata(metadata),
             is_link=True,
         ))
@@ -255,7 +256,8 @@ class Builder:
         content_size: int | None = None,
         checksum: str | None = None,
         id: str | None = None,
-        media_type: str | None = None,
+        content_type: str | None = None,
+        content_encoding: str | None = None,
         source: str | None = None,
         base_resolve: dict | None = None,
         metadata: dict[str, object] | None = None,
@@ -276,7 +278,8 @@ class Builder:
             content_size: Logical/decoded size in bytes (optional).
             checksum: Content hash for verification.
             id: Optional short identifier for cross-referencing.
-            media_type: MIME type of the content.
+            content_type: MIME type of the content (e.g. ``"application/json"``).
+            content_encoding: Content encoding (e.g. ``"gzip"``, ``"zstd"``).
             source: Provenance string.
             base_resolve: Default resolution params for this entry's
                 scheme-specific resolution, keyed by scheme.
@@ -311,7 +314,8 @@ class Builder:
             data=data,
             resolve=resolve_json,
             base_resolve=base_resolve_json,
-            media_type=media_type,
+            content_type=content_type,
+            content_encoding=content_encoding,
             source=source,
             metadata=self._encode_metadata(metadata),
         ))
@@ -374,7 +378,8 @@ class Builder:
                 "data": pa.array(_col("data"), type=pa.binary()),
                 "resolve": pa.array(_col("resolve"), type=pa.string()),
                 "base_resolve": pa.array(_col("base_resolve"), type=pa.string()),
-                "media_type": pa.array(_col("media_type"), type=pa.string()),
+                "content_type": pa.array(_col("content_type"), type=pa.string()),
+                "content_encoding": pa.array(_col("content_encoding"), type=pa.string()),
                 "source": pa.array(_col("source"), type=pa.string()),
                 "metadata": pa.array(_col("metadata"), type=pa.string()),
                 "addressing": pa.array(

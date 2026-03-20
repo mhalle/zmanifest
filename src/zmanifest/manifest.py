@@ -24,7 +24,8 @@ class ManifestEntry:
     resolve: str | None = None  # JSON string
     base_resolve: str | None = None  # JSON string
     id: str | None = None
-    media_type: str | None = None
+    content_type: str | None = None
+    content_encoding: str | None = None
     source: str | None = None
     metadata: str | None = None  # JSON string
 
@@ -187,7 +188,8 @@ class Manifest:
                 resolve=rg.get("resolve"),
                 base_resolve=rg.get("base_resolve"),
                 id=rg.get("id"),
-                media_type=rg.get("media_type"),
+                content_type=rg.get("content_type"),
+                content_encoding=rg.get("content_encoding"),
                 source=rg.get("source"),
                 metadata=rg.get("metadata"),
             )
@@ -359,7 +361,8 @@ class Manifest:
             resolve=_scalar(t, "resolve", idx),
             base_resolve=_scalar(t, "base_resolve", idx),
             id=_scalar(t, "id", idx),
-            media_type=_scalar(t, "media_type", idx),
+            content_type=_scalar(t, "content_type", idx),
+            content_encoding=_scalar(t, "content_encoding", idx),
             source=_scalar(t, "source", idx),
             metadata=_scalar(t, "metadata", idx),
         )
