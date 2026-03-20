@@ -375,15 +375,9 @@ class Builder:
         for row_num, r in enumerate(rows):
             if r.path == "":
                 continue
-            entry: dict[str, Any] = {"path": r.path, "row": row_num}
-            if r.size:
-                entry["size"] = r.size
+            entry: dict[str, Any] = {"p": r.path, "r": row_num}
             if r.addressing:
-                entry["addressing"] = r.addressing
-            if r.retrieval_key is not None:
-                entry["retrieval_key"] = r.retrieval_key
-            if r.id is not None:
-                entry["id"] = r.id
+                entry["a"] = r.addressing
             index_entries.append(entry)
 
         index_json = json.dumps(index_entries, separators=(",", ":"))

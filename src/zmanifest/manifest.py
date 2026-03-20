@@ -172,17 +172,17 @@ class Manifest:
             self._indexed_metadata[root_row_num] = self._root_metadata_raw
 
         for entry_dict in index_data:
-            path = entry_dict["path"]
-            row_num = entry_dict["row"]
-            # Merge: index has path/size/addressing/retrieval_key/id/row,
-            # non-data row group has the rest (text, uri, metadata, etc.)
+            path = entry_dict["p"]
+            row_num = entry_dict["r"]
+            addressing = entry_dict.get("a", [])
+            # Non-data row group has full entry details
             rg = rg_entries.get(path, {})
             entry = ManifestEntry(
                 path=path,
-                size=entry_dict.get("size") or rg.get("size") or 0,
-                addressing=entry_dict.get("addressing", []),
+                size=rg.get("size") or 0,
+                addressing=addressing,
                 content_size=rg.get("content_size"),
-                retrieval_key=entry_dict.get("retrieval_key"),
+                retrieval_key=rg.get("retrieval_key"),
                 text=rg.get("text"),
                 uri=rg.get("uri"),
                 offset=rg.get("offset"),
@@ -197,7 +197,7 @@ class Manifest:
             meta_raw = rg.get("metadata")
             if meta_raw is not None:
                 self._indexed_metadata[row_num] = meta_raw
-            eid = entry_dict.get("id") or rg.get("id")
+            eid = rg.get("id")
             if eid is not None:
                 self._id_index[eid] = row_num
 
