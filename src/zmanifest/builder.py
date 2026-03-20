@@ -177,8 +177,10 @@ class Builder:
     def mount(
         self,
         path: str,
-        resolve: dict,
+        resolve: dict | None = None,
         *,
+        data: bytes | None = None,
+        data_z: bytes | None = None,
         id: str | None = None,
         content_type: str | None = None,
         base_resolve: dict | None = None,
@@ -187,26 +189,35 @@ class Builder:
         """Mount an external store at a path prefix.
 
         The mounted store is opened lazily on first access and handles
-        all reads under this prefix.
+        all reads under this prefix. The child manifest can be referenced
+        via ``resolve`` or embedded inline via ``data`` (uncompressed,
+        e.g. a .zmp file) or ``data_z`` (compressible).
 
         Args:
             path: Mount point path (trailing ``/`` added if missing).
             resolve: Resolution dict (e.g. ``{"http": {"url": "child.zmp"}}``).
+            data: Embedded child manifest (uncompressed parquet column).
+            data_z: Embedded child manifest (zstd-compressed parquet column).
             id: Optional short identifier.
             content_type: MIME type hint.
             base_resolve: Default resolution params for entries within
                 the mounted store, keyed by scheme.
             metadata: Per-entry metadata dict.
         """
+        if data is not None and data_z is not None:
+            raise ValueError("Cannot set both data and data_z")
         if not path.endswith("/"):
             path = path + "/"
+        size = len(data) if data else len(data_z) if data_z else 0
         # Remove any existing row for this path
         self._rows = [r for r in self._rows if r.path != path]
         self._rows.append(_Row(
             path=path,
-            size=0,
+            size=size,
             id=id,
-            resolve=json.dumps(resolve, separators=(",", ":")),
+            data=data,
+            data_z=data_z,
+            resolve=json.dumps(resolve, separators=(",", ":")) if resolve else None,
             base_resolve=json.dumps(base_resolve, separators=(",", ":")) if base_resolve else None,
             content_type=content_type,
             metadata=self._encode_metadata(metadata),
