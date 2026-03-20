@@ -382,8 +382,10 @@ class Builder:
         """
         output = Path(output)
 
-        # Sort rows by path
-        rows = sorted(self._rows, key=lambda r: r.path)
+        # Sort: non-data rows first (by path), then data rows (by path)
+        non_data = sorted([r for r in self._rows if r.data is None], key=lambda r: r.path)
+        data_rows = sorted([r for r in self._rows if r.data is not None], key=lambda r: r.path)
+        rows = non_data + data_rows
 
         # Build columns
         def _col(attr: str) -> list[Any]:
@@ -432,16 +434,6 @@ class Builder:
         use_dictionary = {col: True for col in table.schema.names}
         use_dictionary["data"] = False
 
-        # Row group sizing
-        if self._max_rows_per_group is not None:
-            max_rg = self._max_rows_per_group
-        else:
-            has_inline_data = any(r.data is not None for r in rows)
-            if has_inline_data:
-                max_rg = 2
-            else:
-                max_rg = max(1, math.ceil(len(table) / 16))
-
         compression_level = None
         if self._data_compression_level is not None:
             compression_level = {"data": self._data_compression_level}
@@ -454,12 +446,34 @@ class Builder:
             use_dictionary=use_dictionary,
         )
         try:
-            n = len(table)
-            i = 0
-            while i < n:
-                end = min(i + max_rg, n)
-                writer.write_table(table.slice(i, end - i))
-                i = end
+            n_non_data = len(non_data)
+            n_data = len(data_rows)
+
+            if self._max_rows_per_group is not None:
+                # User override: uniform row group sizing
+                max_rg = self._max_rows_per_group
+                n = len(table)
+                i = 0
+                while i < n:
+                    end = min(i + max_rg, n)
+                    writer.write_table(table.slice(i, end - i))
+                    i = end
+            elif n_data > 0:
+                # Has inline data: non-data rows in one group, then
+                # each data row in its own group
+                if n_non_data > 0:
+                    writer.write_table(table.slice(0, n_non_data))
+                for i in range(n_data):
+                    writer.write_table(table.slice(n_non_data + i, 1))
+            else:
+                # Reference-only: ~16 groups
+                max_rg = max(1, math.ceil(len(table) / 16))
+                n = len(table)
+                i = 0
+                while i < n:
+                    end = min(i + max_rg, n)
+                    writer.write_table(table.slice(i, end - i))
+                    i = end
         finally:
             writer.close()
 
