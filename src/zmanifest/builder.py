@@ -32,25 +32,6 @@ def git_blob_hash(content: bytes) -> str:
 
 
 
-def _parse_array_path_and_chunk_key(
-    path: str, entry_type: str = "file"
-) -> tuple[str | None, str | None]:
-    """Extract array_path and chunk_key from a path with a ``c/`` separator.
-
-    For ``temp/c/0/1``, returns ``("temp", "0/1")``.
-    Returns ``(None, None)`` if no ``c/`` separator is found.
-    """
-    parts = path.split("/")
-    # Find the chunk separator "c" in zarr v3 paths
-    try:
-        c_idx = parts.index("c")
-        array_path = "/".join(parts[:c_idx]) or None
-        chunk_key = "/".join(parts[c_idx + 1 :]) or None
-        return array_path, chunk_key
-    except ValueError:
-        # v2 style or no separator — best effort
-        return None, None
-
 
 # ---------------------------------------------------------------------------
 # Builder — row-level manifest builder
@@ -69,8 +50,6 @@ class _Row:
     uri: str | None = None
     offset: int | None = None
     length: int | None = None
-    array_path: str | None = None
-    chunk_key: str | None = None
     media_type: str | None = None
     source: str | None = None
     checksum: str | None = None  # multihash, e.g. "sha256:abcdef..."
@@ -294,8 +273,6 @@ class Builder:
         content_size: int | None = None,
         retrieval_key: str | None = None,
         id: str | None = None,
-        array_path: str | None = None,
-        chunk_key: str | None = None,
         media_type: str | None = None,
         source: str | None = None,
         checksum: str | None = None,
@@ -322,8 +299,6 @@ class Builder:
             retrieval_key: Content hash. Auto-computed from ``text``
                 (canonical JSON) or ``data`` (raw bytes) if not provided.
             id: Optional short identifier for cross-referencing.
-            array_path: Zarr array this entry belongs to.
-            chunk_key: Chunk coordinates within the array.
             media_type: MIME type of the content.
             source: Provenance string.
             checksum: Multihash for verification (e.g. ``"sha256:abc..."``).
@@ -352,10 +327,6 @@ class Builder:
             elif data is not None:
                 retrieval_key = git_blob_hash(data)
 
-        # Auto-infer array_path / chunk_key from path
-        if array_path is None and chunk_key is None:
-            array_path, chunk_key = _parse_array_path_and_chunk_key(path)
-
         self._rows.append(_Row(
             path=path,
             size=size,
@@ -367,8 +338,6 @@ class Builder:
             uri=uri,
             offset=offset,
             length=length,
-            array_path=array_path,
-            chunk_key=chunk_key,
             media_type=media_type,
             source=source,
             checksum=checksum,
@@ -411,32 +380,10 @@ class Builder:
                 entry["size"] = r.size
             if r.addressing:
                 entry["addressing"] = r.addressing
-            if r.id is not None:
-                entry["id"] = r.id
-            if r.content_size is not None:
-                entry["content_size"] = r.content_size
             if r.retrieval_key is not None:
                 entry["retrieval_key"] = r.retrieval_key
-            if r.uri is not None:
-                entry["uri"] = r.uri
-            if r.offset is not None:
-                entry["offset"] = r.offset
-            if r.length is not None:
-                entry["length"] = r.length
-            if r.array_path is not None:
-                entry["array_path"] = r.array_path
-            if r.chunk_key is not None:
-                entry["chunk_key"] = r.chunk_key
-            if r.media_type is not None:
-                entry["media_type"] = r.media_type
-            if r.source is not None:
-                entry["source"] = r.source
-            if r.base_uri is not None:
-                entry["base_uri"] = r.base_uri
-            if r.checksum is not None:
-                entry["checksum"] = r.checksum
-            if r.metadata is not None:
-                entry["metadata"] = r.metadata
+            if r.id is not None:
+                entry["id"] = r.id
             index_entries.append(entry)
 
         index_json = json.dumps(index_entries, separators=(",", ":"))
@@ -464,8 +411,6 @@ class Builder:
                 "uri": pa.array(_col("uri"), type=pa.string()),
                 "offset": pa.array(_col("offset"), type=pa.int64()),
                 "length": pa.array(_col("length"), type=pa.int64()),
-                "array_path": pa.array(_col("array_path"), type=pa.string()),
-                "chunk_key": pa.array(_col("chunk_key"), type=pa.string()),
                 "media_type": pa.array(_col("media_type"), type=pa.string()),
                 "source": pa.array(_col("source"), type=pa.string()),
                 "checksum": pa.array(_col("checksum"), type=pa.string()),
@@ -523,10 +468,17 @@ class Builder:
                 # Data rows: one per group
                 for i in range(n_data):
                     writer.write_table(table.slice(i, 1))
-                # Non-data rows (text + refs + mounts + links)
+                # Non-data rows: ~1024 rows per group (parquet default-ish)
                 n_non_data = len(non_data_no_root)
                 if n_non_data > 0:
-                    writer.write_table(table.slice(n_data, n_non_data))
+                    rg_size = 1024
+                    offset = n_data
+                    remaining = n_non_data
+                    while remaining > 0:
+                        chunk = min(remaining, rg_size)
+                        writer.write_table(table.slice(offset, chunk))
+                        offset += chunk
+                        remaining -= chunk
                 # Index row alone in the very last group
                 if root_rows:
                     writer.write_table(table.slice(n_data + n_non_data, 1))

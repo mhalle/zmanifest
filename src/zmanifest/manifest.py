@@ -24,8 +24,6 @@ class ManifestEntry:
     uri: str | None = None
     offset: int | None = None
     length: int | None = None
-    array_path: str | None = None
-    chunk_key: str | None = None
     media_type: str | None = None
     source: str | None = None
     base_uri: str | None = None
@@ -132,19 +130,25 @@ class Manifest:
         # Store the root row's metadata
         self._root_metadata_raw = index_rg.column("metadata")[0].as_py()
 
-        # Read the second-to-last row group for text and metadata content
-        rg_text: dict[str, str | None] = {}
-        rg_metadata: dict[str, str | None] = {}
-        if num_rgs >= 2:
-            non_data_rg_idx = num_rgs - 2
+        # Read non-data row groups (between data rows and the index).
+        # Data rows each get their own 1-row group. Count them from the index.
+        rg_entries: dict[str, dict[str, Any]] = {}
+        n_data_rgs = sum(
+            1 for e in index_data if "D" in e.get("addressing", [])
+        )
+        non_data_rg_indices = list(range(n_data_rgs, num_rgs - 1))
+
+        if non_data_rg_indices:
             try:
-                non_data_rg = self._pf.read_row_groups(
-                    [non_data_rg_idx], columns=["path", "text", "metadata"],
-                )
+                non_data_rg = self._pf.read_row_groups(non_data_rg_indices)
+                col_names = non_data_rg.column_names
                 for i in range(len(non_data_rg)):
                     p = non_data_rg.column("path")[i].as_py()
-                    rg_text[p] = non_data_rg.column("text")[i].as_py()
-                    rg_metadata[p] = non_data_rg.column("metadata")[i].as_py()
+                    row_dict: dict[str, Any] = {}
+                    for col in col_names:
+                        if col != "path" and col != "data":
+                            row_dict[col] = non_data_rg.column(col)[i].as_py()
+                    rg_entries[p] = row_dict
             except Exception:
                 pass
 
@@ -169,32 +173,31 @@ class Manifest:
 
         for entry_dict in index_data:
             path = entry_dict["path"]
-            # Text comes from the non-data row group
-            text_val = rg_text.get(path)
+            row_num = entry_dict["row"]
+            # Merge: index has path/size/addressing/retrieval_key/id/row,
+            # non-data row group has the rest (text, uri, metadata, etc.)
+            rg = rg_entries.get(path, {})
             entry = ManifestEntry(
                 path=path,
-                size=entry_dict.get("size", 0),
+                size=entry_dict.get("size") or rg.get("size") or 0,
                 addressing=entry_dict.get("addressing", []),
-                content_size=entry_dict.get("content_size"),
+                content_size=rg.get("content_size"),
                 retrieval_key=entry_dict.get("retrieval_key"),
-                text=text_val,
-                uri=entry_dict.get("uri"),
-                offset=entry_dict.get("offset"),
-                length=entry_dict.get("length"),
-                array_path=entry_dict.get("array_path"),
-                chunk_key=entry_dict.get("chunk_key"),
-                media_type=entry_dict.get("media_type"),
-                source=entry_dict.get("source"),
-                base_uri=entry_dict.get("base_uri"),
+                text=rg.get("text"),
+                uri=rg.get("uri"),
+                offset=rg.get("offset"),
+                length=rg.get("length"),
+                media_type=rg.get("media_type"),
+                source=rg.get("source"),
+                base_uri=rg.get("base_uri"),
             )
-            row_num = entry_dict["row"]
             self._indexed_entries[path] = entry
             self._indexed_row_map[path] = row_num
             self._index[path] = row_num
-            meta_raw = entry_dict.get("metadata") or rg_metadata.get(path)
+            meta_raw = rg.get("metadata")
             if meta_raw is not None:
                 self._indexed_metadata[row_num] = meta_raw
-            eid = entry_dict.get("id")
+            eid = entry_dict.get("id") or rg.get("id")
             if eid is not None:
                 self._id_index[eid] = row_num
 
@@ -356,8 +359,6 @@ class Manifest:
             uri=_scalar(t, "uri", idx),
             offset=_scalar(t, "offset", idx),
             length=_scalar(t, "length", idx),
-            array_path=_scalar(t, "array_path", idx),
-            chunk_key=_scalar(t, "chunk_key", idx),
             media_type=_scalar(t, "media_type", idx),
             source=_scalar(t, "source", idx),
             base_uri=_scalar(t, "base_uri", idx),
