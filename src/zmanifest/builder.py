@@ -123,7 +123,7 @@ class Builder:
     def _encode_metadata(metadata: dict[str, object] | None) -> str | None:
         if metadata is None:
             return None
-        return json.dumps(metadata, separators=(",", ":"), sort_keys=True)
+        return rfc8785.dumps(metadata).decode("utf-8")
 
     def set_root_metadata(
         self,
