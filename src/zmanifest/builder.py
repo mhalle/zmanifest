@@ -312,6 +312,16 @@ class Builder:
         if data is not None and data_z is not None:
             raise ValueError("Cannot set both data and data_z")
 
+        # Canonicalize JSON text (by extension or content_type)
+        if text is not None and (
+            path.endswith(".json")
+            or (content_type and "json" in content_type)
+        ):
+            try:
+                text = rfc8785.dumps(json.loads(text)).decode("utf-8")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+
         # Auto-compute size
         if size is None:
             if text is not None:
