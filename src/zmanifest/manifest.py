@@ -287,11 +287,9 @@ class Manifest:
     def path_metadata(self, path: str) -> dict[str, Any] | None:
         """Metadata dict from an annotation row, or None.
 
-        Use ``""`` for root, or a trailing-slash path for groups
-        (e.g. ``"temperature/"``).
+        Use ``""`` for root, or a path for groups (e.g. ``"temperature"``).
         """
-        if path != "" and not path.endswith("/"):
-            path = path + "/"
+        path = path.rstrip("/")
         idx = self._index.get(path)
         if idx is None:
             return None
@@ -432,10 +430,15 @@ class Manifest:
             cumulative += rg_rows
         return None
 
-    @staticmethod
-    def _is_annotation(path: str) -> bool:
-        """Annotation rows: root ("") and path metadata ("group/")."""
-        return path == "" or path.endswith("/")
+    def _is_annotation(self, path: str) -> bool:
+        """Annotation rows: root ("") and folder entries (F flag)."""
+        if path == "":
+            return True
+        entry = self.get_entry(path)
+        if entry is not None:
+            from ._types import Addressing
+            return Addressing.FOLDER in entry.addressing
+        return False
 
     def list_paths(self) -> Iterator[str]:
         yield from self._index
@@ -449,21 +452,20 @@ class Manifest:
         """List immediate children under a prefix (like a directory listing).
 
         For prefix ``""``, lists top-level entries.
-        For prefix ``"group/"``, lists entries directly in that group.
+        For prefix ``"group"``, lists entries directly in that group.
 
-        Annotation rows (root ``""`` and path metadata ``"group/"``) are
-        excluded from iteration.
+        Annotation/folder rows are excluded from iteration.
         """
-        if prefix and not prefix.endswith("/"):
-            prefix = prefix + "/"
+        prefix = prefix.rstrip("/")
+        search_prefix = prefix + "/" if prefix else ""
 
         seen: set[str] = set()
         for p in self._index:
             if self._is_annotation(p):
                 continue
-            if not p.startswith(prefix):
+            if not p.startswith(search_prefix):
                 continue
-            rest = p[len(prefix) :]
+            rest = p[len(search_prefix):]
             slash_idx = rest.find("/")
             entry = rest if slash_idx == -1 else rest[: slash_idx + 1]
             if entry not in seen:

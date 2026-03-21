@@ -56,6 +56,7 @@ class _Row:
     metadata: str | None = None  # JSON string
     is_mount: bool = False
     is_link: bool = False
+    is_folder: bool = False
     is_index: bool = False
 
     @property
@@ -67,6 +68,7 @@ class _Row:
             resolve=self.resolve,
             is_link=self.is_link,
             is_mount=self.is_mount,
+            is_folder=self.is_folder,
             is_index=self.is_index,
         )
 
@@ -149,22 +151,17 @@ class Builder:
     ) -> None:
         """Set metadata on a path (group or root) in the manifest.
 
-        Use ``""`` for root, or a trailing-slash path for groups
-        (e.g. ``"temperature/"``). These rows are invisible to the
-        zarr Store interface but queryable via DuckDB.
-
-        Calling this multiple times for the same path replaces the
-        previous value.
+        Use ``""`` for root, or a path for groups (e.g. ``"temperature"``).
+        These rows are invisible to the zarr Store interface but queryable
+        via DuckDB.
 
         Args:
             path: Path for the metadata row. ``""`` for root, or
-                ``"group/"`` for group-level metadata.
+                ``"group"`` for group-level metadata.
             metadata: Metadata dict (stored as JSON).
             id: Optional short identifier for this row.
         """
-        # Normalize: ensure non-root paths end with /
-        if path != "" and not path.endswith("/"):
-            path = path + "/"
+        path = path.rstrip("/")
         # Remove any existing row for this path
         self._rows = [r for r in self._rows if r.path != path]
         self._rows.append(_Row(
@@ -172,6 +169,7 @@ class Builder:
             size=0,
             id=id,
             metadata=self._encode_metadata(metadata),
+            is_folder=True,
         ))
 
     def mount(
@@ -206,8 +204,7 @@ class Builder:
         """
         if data is not None and data_z is not None:
             raise ValueError("Cannot set both data and data_z")
-        if not path.endswith("/"):
-            path = path + "/"
+        path = path.rstrip("/")
         size = len(data) if data else len(data_z) if data_z else 0
         # Remove any existing row for this path
         self._rows = [r for r in self._rows if r.path != path]
@@ -222,6 +219,7 @@ class Builder:
             content_type=content_type,
             metadata=self._encode_metadata(metadata),
             is_mount=True,
+            is_folder=True,
         ))
 
     def link(
@@ -229,6 +227,7 @@ class Builder:
         path: str,
         target: str,
         *,
+        folder: bool = False,
         id: str | None = None,
         content_type: str | None = None,
         metadata: dict[str, object] | None = None,
@@ -236,15 +235,22 @@ class Builder:
         """Create a link entry that points to another path in the manifest.
 
         When resolved, the link's content comes from the target entry.
-        The target path is always relative to the manifest root.
+        If ``folder=True`` (or path ends with ``/``), the link acts as
+        a directory — all sub-paths are rewritten through the target prefix.
 
         Args:
             path: The link's path in the manifest.
             target: Path of the target entry (relative to manifest root).
+            folder: If True, this is a directory link.
             id: Optional short identifier.
             content_type: MIME type hint.
             metadata: Per-entry metadata dict.
         """
+        # Detect directory link from trailing /
+        if path.endswith("/"):
+            folder = True
+        path = path.rstrip("/")
+        target = target.rstrip("/")
         resolve_dict = {"_path": {"target": target}}
         # Remove any existing row for this path
         self._rows = [r for r in self._rows if r.path != path]
@@ -256,6 +262,7 @@ class Builder:
             content_type=content_type,
             metadata=self._encode_metadata(metadata),
             is_link=True,
+            is_folder=folder,
         ))
 
     def add(
@@ -356,7 +363,7 @@ class Builder:
         # Ensure a root row exists for the index
         has_root = any(r.path == "" for r in self._rows)
         if not has_root:
-            self._rows.append(_Row(path="", size=0))
+            self._rows.append(_Row(path="", size=0, is_folder=True))
 
         # Data rows first (one per row group), then non-data rows in the
         # final row group with the index row last.

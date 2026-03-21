@@ -20,6 +20,7 @@ def compute_addressing(
     resolve: dict | str | None = None,
     is_link: bool = False,
     is_mount: bool = False,
+    is_folder: bool = False,
     is_index: bool = False,
 ) -> str:
     """Compute addressing flags string from populated fields."""
@@ -36,6 +37,8 @@ def compute_addressing(
         flags += Addressing.LINK
     if is_mount:
         flags += Addressing.MOUNT
+    if is_folder:
+        flags += Addressing.FOLDER
     if is_index:
         flags += Addressing.INDEX
     return flags
@@ -50,4 +53,5 @@ class Addressing(enum.StrEnum):
     RESOLVE = "R"
     LINK = "L"
     MOUNT = "M"
+    FOLDER = "F"
     INDEX = "I"
