@@ -214,16 +214,22 @@ class Manifest:
         self._index[""] = root_row_num
         return True
 
+    # Keys whose values are JSON objects/arrays and should be parsed
+    _JSON_METADATA_KEYS = {"base_resolve"}
+
     def _parse_metadata(self) -> ManifestMetadata:
         kv = self._pf.schema_arrow.metadata or {}
         result: dict[str, Any] = {}
         for k_bytes, v_bytes in kv.items():
             key = k_bytes.decode("utf-8") if isinstance(k_bytes, bytes) else k_bytes
             val = v_bytes.decode("utf-8") if isinstance(v_bytes, bytes) else v_bytes
-            # Try to JSON-decode the value
-            try:
-                result[key] = json.loads(val)
-            except (json.JSONDecodeError, TypeError):
+            # Only JSON-decode known structured fields
+            if key in self._JSON_METADATA_KEYS:
+                try:
+                    result[key] = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    result[key] = val
+            else:
                 result[key] = val
         # Extract required keys
         meta = ManifestMetadata(

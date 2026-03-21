@@ -365,8 +365,19 @@ class Builder:
         if not has_root:
             self._rows.append(_Row(path="", size=0, is_folder=True))
 
-        # Data rows first (one per row group), then non-data rows in the
-        # final row group with the index row last.
+        # Canonicalize all JSON fields for deterministic output
+        for r in self._rows:
+            if r.resolve is not None:
+                r.resolve = rfc8785.dumps(json.loads(r.resolve)).decode("utf-8")
+            if r.base_resolve is not None:
+                r.base_resolve = rfc8785.dumps(json.loads(r.base_resolve)).decode("utf-8")
+            if r.metadata is not None:
+                r.metadata = rfc8785.dumps(json.loads(r.metadata)).decode("utf-8")
+
+        # Deterministic row order:
+        # 1. data/data_z rows (sorted by path)
+        # 2. non-data rows (sorted by path)
+        # 3. root/index row
         def _has_data(r: _Row) -> bool:
             return r.data is not None or r.data_z is not None
 
@@ -389,7 +400,7 @@ class Builder:
                 entry["a"] = r.addressing
             index_entries.append(entry)
 
-        index_json = json.dumps(index_entries, separators=(",", ":"))
+        index_json = rfc8785.dumps(index_entries).decode("utf-8")
 
         # Inject index into the root row
         for r in rows:
@@ -426,13 +437,16 @@ class Builder:
 
         # File-level metadata
         file_meta: dict[bytes, bytes] = {
-            b"zmp_version": json.dumps("0.2.0").encode(),
-            b"zarr_format": json.dumps(self._zarr_format).encode(),
+            b"zmp_version": b"0.2.0",
+            b"zarr_format": self._zarr_format.encode(),
         }
         if self._base_resolve is not None:
-            file_meta[b"base_resolve"] = json.dumps(self._base_resolve).encode()
+            file_meta[b"base_resolve"] = rfc8785.dumps(self._base_resolve)
         for k, v in self._metadata.items():
-            file_meta[k.encode()] = v.encode() if isinstance(v, str) else json.dumps(v).encode()
+            if isinstance(v, str):
+                file_meta[k.encode()] = v.encode()
+            else:
+                file_meta[k.encode()] = rfc8785.dumps(v)
 
         schema = table.schema.with_metadata(file_meta)
         table = table.cast(schema)
@@ -459,7 +473,6 @@ class Builder:
         )
         try:
             n_data = len(data_rows)
-            n_tail = len(non_data_no_root) + len(root_rows)
 
             if self._max_rows_per_group is not None:
                 # User override: uniform row group sizing
