@@ -179,9 +179,9 @@ class TestBuilder:
         resolve = json.loads(manifest.get_entry("virtual/c/0").resolve)
         assert resolve["http"]["url"] == "https://example.com/data.bin"
 
-    def test_root_metadata(self, tmp_path: Path) -> None:
+    def test_archive_metadata(self, tmp_path: Path) -> None:
         builder = Builder()
-        builder.set_root_metadata({
+        builder.set_archive_metadata({
             "description": "CT scan",
             "modality": "CT",
             "series_uid": "1.2.840.113619.1234",
@@ -190,10 +190,10 @@ class TestBuilder:
         zmp_path = builder.write(tmp_path / "out.zmp")
 
         manifest = Manifest(str(zmp_path))
-        rm = manifest.root_metadata
-        assert rm is not None
-        assert rm["description"] == "CT scan"
-        assert rm["modality"] == "CT"
+        am = manifest.archive_metadata
+        assert am is not None
+        assert am["description"] == "CT scan"
+        assert am["modality"] == "CT"
 
     def test_per_entry_metadata(self, tmp_path: Path) -> None:
         """Per-entry metadata is stored as JSON and queryable."""

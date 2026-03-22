@@ -125,22 +125,28 @@ class Builder:
             return None
         return rfc8785.dumps(metadata).decode("utf-8")
 
-    def set_root_metadata(
+    def set_archive_metadata(
         self,
         metadata: dict[str, object],
         *,
         id: str | None = None,
     ) -> None:
-        """Set dataset-level metadata on the root entry.
+        """Set metadata about the archive itself.
 
-        Stored as a row with path ``""`` and type ``"metadata"``.
+        This is metadata about the container (e.g. DICOM series UID,
+        description, provenance) — not about any path within the archive.
+        Stored on the ``""`` row which also holds the index.
+
         Calling this multiple times replaces the previous value.
 
         Args:
-            metadata: Dataset-level metadata dict.
+            metadata: Archive-level metadata dict.
             id: Optional short identifier for this row.
         """
         self.set_path_metadata("", metadata, id=id)
+
+    # Keep old name as alias for backward compatibility
+    set_root_metadata = set_archive_metadata
 
     def set_path_metadata(
         self,
@@ -149,15 +155,18 @@ class Builder:
         *,
         id: str | None = None,
     ) -> None:
-        """Set metadata on a path (group or root) in the manifest.
+        """Set metadata on a path (group or directory) in the manifest.
 
-        Use ``""`` for root, or a path for groups (e.g. ``"temperature"``).
+        Use :meth:`set_archive_metadata` for archive-level metadata.
+        Use this method for group/directory annotations
+        (e.g. ``"temperature"``, ``"scans/ct"``).
+
         These rows are invisible to the zarr Store interface but queryable
-        via DuckDB.
+        via DuckDB or :meth:`Manifest.path_metadata`.
 
         Args:
-            path: Path for the metadata row. ``""`` for root, or
-                ``"group"`` for group-level metadata.
+            path: Path for the metadata row, e.g. ``"scans/ct"``.
+                Use :meth:`set_archive_metadata` for archive-level metadata.
             metadata: Metadata dict (stored as JSON).
             id: Optional short identifier for this row.
         """
@@ -370,9 +379,10 @@ class Builder:
         """
         output = Path(output)
 
-        # Ensure a root row exists for the index
-        has_root = any(r.path == "" for r in self._rows)
-        if not has_root:
+        # Ensure the archive row ("") exists — holds the index and
+        # archive-level metadata.  Not a path in the hierarchy.
+        has_archive_row = any(r.path == "" for r in self._rows)
+        if not has_archive_row:
             self._rows.append(_Row(path="", size=0, is_folder=True))
 
         # Canonicalize all JSON fields for deterministic output
@@ -387,7 +397,7 @@ class Builder:
         # Deterministic row order:
         # 1. data/data_z rows (sorted by path)
         # 2. non-data rows (sorted by path)
-        # 3. root/index row
+        # 3. archive/index row
         def _has_data(r: _Row) -> bool:
             return r.data is not None or r.data_z is not None
 
@@ -399,8 +409,8 @@ class Builder:
         root_rows = [r for r in self._rows if r.path == ""]
         rows = data_rows + non_data_no_root + root_rows
 
-        # Build index: lightweight fields + row number for every non-root row.
-        # The index is stored in the root row's text field with addressing [I].
+        # Build index: lightweight fields + row number for every non-archive row.
+        # The index is stored in the archive row's text field with addressing [I].
         index_entries = []
         for row_num, r in enumerate(rows):
             if r.path == "":
@@ -412,7 +422,7 @@ class Builder:
 
         index_json = rfc8785.dumps(index_entries).decode("utf-8")
 
-        # Inject index into the root row
+        # Inject index into the archive row
         for r in rows:
             if r.path == "":
                 r.text = index_json

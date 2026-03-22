@@ -286,14 +286,22 @@ class Manifest:
         return self._metadata
 
     @property
-    def root_metadata(self) -> dict[str, Any] | None:
-        """Dataset-level metadata from the root row (path ``""``), or None."""
+    def archive_metadata(self) -> dict[str, Any] | None:
+        """Metadata about the archive itself (from the ``""`` row), or None.
+
+        This is metadata about the container (e.g. DICOM series UID,
+        description, provenance) — not about any path within the archive.
+        """
         return self.path_metadata("")
 
-    def path_metadata(self, path: str) -> dict[str, Any] | None:
-        """Metadata dict from an annotation row, or None.
+    # Keep old name as alias
+    root_metadata = archive_metadata
 
-        Use ``""`` for root, or a path for groups (e.g. ``"temperature"``).
+    def path_metadata(self, path: str) -> dict[str, Any] | None:
+        """Metadata dict from a path annotation row, or None.
+
+        For archive-level metadata, use :attr:`archive_metadata`.
+        For group/directory metadata, pass the path (e.g. ``"scans/ct"``).
         """
         path = path.rstrip("/")
         idx = self._index.get(path)
@@ -437,7 +445,7 @@ class Manifest:
         return None
 
     def _is_annotation(self, path: str) -> bool:
-        """Annotation rows: root ("") and folder entries (F flag)."""
+        """Annotation rows: archive row ("") and folder entries (F flag)."""
         if path == "":
             return True
         entry = self.get_entry(path)
