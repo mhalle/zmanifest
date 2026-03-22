@@ -95,10 +95,12 @@ class Manifest:
             self._data_table = None
 
         # Build path -> row index mapping
+        # Normalize to absolute paths (old files may have bare paths)
         path_col = self._table.column("path")
         self._index: dict[str, int] = {}
         for i, p in enumerate(path_col):
-            self._index[p.as_py()] = i
+            raw = p.as_py()
+            self._index[_to_manifest_path(raw)] = i
 
         # Build id -> row index mapping (sparse — most rows have no id)
         self._id_index: dict[str, int] = {}
@@ -194,11 +196,12 @@ class Manifest:
             self._indexed_metadata[root_row_num] = self._root_metadata_raw
 
         for entry_dict in index_data:
-            path = entry_dict["p"]
+            raw_path = entry_dict["p"]
+            path = _to_manifest_path(raw_path)
             row_num = entry_dict["r"]
             addressing = entry_dict.get("a", "")
             # Non-data row group has full entry details
-            rg = rg_entries.get(path, {})
+            rg = rg_entries.get(raw_path, {}) or rg_entries.get(path, {})
             entry = ManifestEntry(
                 path=path,
                 size=rg.get("size") or 0,
@@ -384,8 +387,9 @@ class Manifest:
         if t is None:
             raise RuntimeError("No table loaded — use get_entry() for indexed manifests")
         addr = _scalar(t, "addressing", idx)
+        raw_path = _scalar(t, "path", idx)
         return ManifestEntry(
-            path=_scalar(t, "path", idx),
+            path=_to_manifest_path(raw_path) if raw_path else "",
             size=_scalar(t, "size", idx) or 0,
             addressing=addr if addr is not None else "",
             content_size=_scalar(t, "content_size", idx),
