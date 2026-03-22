@@ -1,5 +1,6 @@
 from ._types import Addressing, ManifestMetadata
 from .builder import Builder, canonical_json, git_blob_hash
+from .path import ZPath
 from .convert import dehydrate, hash, hydrate
 from .manifest import Manifest, ManifestEntry
 from .resolve import (
@@ -27,6 +28,7 @@ __all__ = [
     "git_blob_hash",
     "hash",
     "hydrate",
+    "ZPath",
     "build_base_chain",
     "resolve_entry",
 ]
