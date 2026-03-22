@@ -115,7 +115,7 @@ class TestBuilder:
         assert "chunk_key" not in pf.schema_arrow.names
 
     def test_sorted_output(self, tmp_path: Path) -> None:
-        """Data rows first, then non-data (text), then root index."""
+        """Archive row first, then non-data (text), then data rows."""
         builder = Builder()
         builder.add("zarr.json", text='{}')
         builder.add("b/c/0", data=b"\x01")
@@ -124,7 +124,8 @@ class TestBuilder:
         zmp_path = builder.write(tmp_path / "out.zmp")
         manifest = Manifest(str(zmp_path))
         paths = list(manifest.list_paths())
-        assert paths == ["a/c/0", "b/c/0", "zarr.json", ""]
+        # archive first, then non-data sorted, then data sorted
+        assert paths == ["", "zarr.json", "a/c/0", "b/c/0"]
 
     def test_file_level_metadata(self, tmp_path: Path) -> None:
         builder = Builder(

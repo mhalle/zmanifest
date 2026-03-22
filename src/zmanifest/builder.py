@@ -408,22 +408,26 @@ class Builder:
             if r.metadata is not None:
                 r.metadata = rfc8785.dumps(json.loads(r.metadata)).decode("utf-8")
 
-        # Deterministic row order:
-        # 1. data/data_z rows (sorted by path) — bulk of the file
-        # 2. non-data rows (sorted by path) — metadata, resolve refs
-        # 3. archive row (path "") — archive metadata
+        # Deterministic row order (metadata-first layout):
+        # 1. archive row (path "") — archive metadata, always first
+        # 2. non-data rows (sorted by path) — zarr.json, resolve refs
+        # 3. data/data_z rows (sorted by path) — bulk blobs at end
+        #
+        # This layout puts small metadata near the start of the file,
+        # which is optimal for HTTP range-request access (footer at end,
+        # metadata at start, blobs in the middle/end read on demand).
         def _has_data(r: _Row) -> bool:
             return r.data is not None or r.data_z is not None
 
-        data_rows = sorted(
-            [r for r in self._rows if _has_data(r)], key=lambda r: r.path
-        )
+        archive_rows = [r for r in self._rows if r.path == ""]
         non_data_rows = sorted(
             [r for r in self._rows if not _has_data(r) and r.path != ""],
             key=lambda r: r.path,
         )
-        archive_rows = [r for r in self._rows if r.path == ""]
-        rows = data_rows + non_data_rows + archive_rows
+        data_rows = sorted(
+            [r for r in self._rows if _has_data(r)], key=lambda r: r.path
+        )
+        rows = archive_rows + non_data_rows + data_rows
 
         # Build the table
         def _col(attr: str) -> list[Any]:
@@ -501,15 +505,26 @@ class Builder:
                     writer.write_table(table.slice(i, end - i))
                     i = end
             else:
-                # --- Adaptive row group sizing ---
+                # --- Metadata-first layout ---
                 #
-                # Data rows: accumulate until data column exceeds
-                # TARGET_RG_DATA_BYTES or MAX_RG_ROWS.  This naturally
-                # adapts to blob size: small blobs → large row groups,
-                # large blobs → small row groups.
+                # 1. Archive row: own row group (first in file)
+                offset = 0
+                if n_archive > 0:
+                    writer.write_table(table.slice(offset, n_archive))
+                offset += n_archive
+
+                # 2. Non-data rows: single row group (small metadata)
+                if n_non_data > 0:
+                    writer.write_table(table.slice(offset, n_non_data))
+                offset += n_non_data
+
+                # 3. Data rows: adaptive row group sizing.
+                #    Accumulate until data column exceeds TARGET_RG_DATA_BYTES
+                #    or row count exceeds MAX_RG_ROWS. This naturally adapts:
+                #    small blobs → large row groups, large blobs → small.
                 target = self._TARGET_RG_DATA_BYTES
                 max_rows = self._MAX_RG_ROWS
-                rg_start = 0
+                rg_start = offset
                 rg_data_bytes = 0
                 rg_rows = 0
 
@@ -519,26 +534,14 @@ class Builder:
                     rg_rows += 1
 
                     if rg_data_bytes >= target or rg_rows >= max_rows:
-                        writer.write_table(table.slice(rg_start, i - rg_start + 1))
-                        rg_start = i + 1
+                        writer.write_table(table.slice(rg_start, offset + i - rg_start + 1))
+                        rg_start = offset + i + 1
                         rg_data_bytes = 0
                         rg_rows = 0
 
                 # Flush remaining data rows
-                if rg_start < n_data:
-                    writer.write_table(table.slice(rg_start, n_data - rg_start))
-
-                # Non-data rows: single row group (they're small)
-                if n_non_data > 0:
-                    writer.write_table(
-                        table.slice(n_data, n_non_data)
-                    )
-
-                # Archive row: own row group (always last)
-                if n_archive > 0:
-                    writer.write_table(
-                        table.slice(n_data + n_non_data, n_archive)
-                    )
+                if rg_start < offset + n_data:
+                    writer.write_table(table.slice(rg_start, offset + n_data - rg_start))
         finally:
             writer.close()
 
