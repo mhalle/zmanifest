@@ -141,7 +141,7 @@ class TestBuilder:
         assert manifest.metadata.get("extra", {}).get("doi") == "10.1234/test"
 
     def test_row_group_sizing_inline(self, tmp_path: Path) -> None:
-        """Inline data uses small row groups."""
+        """Inline data row groups are adaptively sized."""
         builder = Builder()
         builder.add("zarr.json", text='{}')
         for i in range(10):
@@ -149,8 +149,10 @@ class TestBuilder:
         zmp_path = builder.write(tmp_path / "out.zmp")
 
         pf = pq.ParquetFile(str(zmp_path))
-        for i in range(pf.metadata.num_row_groups):
-            assert pf.metadata.row_group(i).num_rows <= 2
+        # 10 x 100 bytes = 1KB total data, well under 10MB target
+        # so all 10 data rows should be in one row group,
+        # plus 1 for non-data (zarr.json), plus 1 for archive row
+        assert pf.metadata.num_row_groups == 3
 
     def test_row_group_sizing_refs(self, tmp_path: Path) -> None:
         """Reference-only uses larger row groups."""

@@ -371,16 +371,30 @@ class Builder:
             metadata=self._encode_metadata(metadata),
         ))
 
+    # Adaptive row group sizing defaults.
+    # See docs/parquet-layout.md for benchmarks and rationale.
+    _TARGET_RG_DATA_BYTES: int = 10 * 1024 * 1024  # 10 MB of blob data per RG
+    _MAX_RG_ROWS: int = 2000  # cap rows per RG even for tiny blobs
+
     def write(self, output: str | Path) -> Path:
         """Write the manifest to a ZMP parquet file.
+
+        Row groups are sized adaptively to keep blob-column I/O bounded:
+        each row group accumulates rows until the data column would exceed
+        ``TARGET_RG_DATA_BYTES`` (10 MB) or the row count exceeds
+        ``MAX_RG_ROWS`` (2000). This adapts to mixed blob sizes
+        automatically.
+
+        Row order is deterministic: data rows (sorted by path), then
+        non-data rows (sorted by path), then the archive row.
 
         Returns:
             Path to the written file.
         """
         output = Path(output)
 
-        # Ensure the archive row ("") exists — holds the index and
-        # archive-level metadata.  Not a path in the hierarchy.
+        # Ensure the archive row ("") exists — holds archive-level metadata.
+        # Not a path in the hierarchy.
         has_archive_row = any(r.path == "" for r in self._rows)
         if not has_archive_row:
             self._rows.append(_Row(path="", size=0, is_folder=True))
@@ -395,41 +409,23 @@ class Builder:
                 r.metadata = rfc8785.dumps(json.loads(r.metadata)).decode("utf-8")
 
         # Deterministic row order:
-        # 1. data/data_z rows (sorted by path)
-        # 2. non-data rows (sorted by path)
-        # 3. archive/index row
+        # 1. data/data_z rows (sorted by path) — bulk of the file
+        # 2. non-data rows (sorted by path) — metadata, resolve refs
+        # 3. archive row (path "") — archive metadata
         def _has_data(r: _Row) -> bool:
             return r.data is not None or r.data_z is not None
 
-        data_rows = sorted([r for r in self._rows if _has_data(r)], key=lambda r: r.path)
-        non_data_no_root = sorted(
+        data_rows = sorted(
+            [r for r in self._rows if _has_data(r)], key=lambda r: r.path
+        )
+        non_data_rows = sorted(
             [r for r in self._rows if not _has_data(r) and r.path != ""],
             key=lambda r: r.path,
         )
-        root_rows = [r for r in self._rows if r.path == ""]
-        rows = data_rows + non_data_no_root + root_rows
+        archive_rows = [r for r in self._rows if r.path == ""]
+        rows = data_rows + non_data_rows + archive_rows
 
-        # Build index: lightweight fields + row number for every non-archive row.
-        # The index is stored in the archive row's text field with addressing [I].
-        index_entries = []
-        for row_num, r in enumerate(rows):
-            if r.path == "":
-                continue
-            entry: dict[str, Any] = {"p": r.path, "r": row_num}
-            if r.addressing:
-                entry["a"] = r.addressing
-            index_entries.append(entry)
-
-        index_json = rfc8785.dumps(index_entries).decode("utf-8")
-
-        # Inject index into the archive row
-        for r in rows:
-            if r.path == "":
-                r.text = index_json
-                r.is_index = True
-                break
-
-        # Build columns
+        # Build the table
         def _col(attr: str) -> list[Any]:
             return [getattr(r, attr) for r in rows]
 
@@ -471,14 +467,12 @@ class Builder:
         schema = table.schema.with_metadata(file_meta)
         table = table.cast(schema)
 
-        # Compression: data is uncompressed (pre-compressed content),
-        # data_z is zstd (compressible content), everything else is zstd.
+        # Per-column compression: data is uncompressed (pre-compressed
+        # zarr chunks), everything else is zstd for compact metadata.
         compression = {col: "zstd" for col in table.schema.names}
         compression["data"] = "none"
-        compression["data_z"] = "zstd"
-        use_dictionary = {col: True for col in table.schema.names}
-        use_dictionary["data"] = False
-        use_dictionary["data_z"] = False
+        # Disable dictionary encoding for unique-value columns
+        use_dictionary = {col: False for col in table.schema.names}
 
         compression_level = None
         if self._data_compression_level is not None:
@@ -490,9 +484,12 @@ class Builder:
             compression=compression,
             compression_level=compression_level,
             use_dictionary=use_dictionary,
+            write_page_index=True,
         )
         try:
             n_data = len(data_rows)
+            n_non_data = len(non_data_rows)
+            n_archive = len(archive_rows)
 
             if self._max_rows_per_group is not None:
                 # User override: uniform row group sizing
@@ -504,23 +501,44 @@ class Builder:
                     writer.write_table(table.slice(i, end - i))
                     i = end
             else:
-                # Data rows: one per group
+                # --- Adaptive row group sizing ---
+                #
+                # Data rows: accumulate until data column exceeds
+                # TARGET_RG_DATA_BYTES or MAX_RG_ROWS.  This naturally
+                # adapts to blob size: small blobs → large row groups,
+                # large blobs → small row groups.
+                target = self._TARGET_RG_DATA_BYTES
+                max_rows = self._MAX_RG_ROWS
+                rg_start = 0
+                rg_data_bytes = 0
+                rg_rows = 0
+
                 for i in range(n_data):
-                    writer.write_table(table.slice(i, 1))
-                # Non-data rows: ~1024 rows per group (parquet default-ish)
-                n_non_data = len(non_data_no_root)
+                    blob_size = len(data_rows[i].data or b"") + len(data_rows[i].data_z or b"")
+                    rg_data_bytes += blob_size
+                    rg_rows += 1
+
+                    if rg_data_bytes >= target or rg_rows >= max_rows:
+                        writer.write_table(table.slice(rg_start, i - rg_start + 1))
+                        rg_start = i + 1
+                        rg_data_bytes = 0
+                        rg_rows = 0
+
+                # Flush remaining data rows
+                if rg_start < n_data:
+                    writer.write_table(table.slice(rg_start, n_data - rg_start))
+
+                # Non-data rows: single row group (they're small)
                 if n_non_data > 0:
-                    rg_size = 1024
-                    offset = n_data
-                    remaining = n_non_data
-                    while remaining > 0:
-                        chunk = min(remaining, rg_size)
-                        writer.write_table(table.slice(offset, chunk))
-                        offset += chunk
-                        remaining -= chunk
-                # Index row alone in the very last group
-                if root_rows:
-                    writer.write_table(table.slice(n_data + n_non_data, 1))
+                    writer.write_table(
+                        table.slice(n_data, n_non_data)
+                    )
+
+                # Archive row: own row group (always last)
+                if n_archive > 0:
+                    writer.write_table(
+                        table.slice(n_data + n_non_data, n_archive)
+                    )
         finally:
             writer.close()
 
