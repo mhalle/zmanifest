@@ -150,19 +150,24 @@ When writing a ZMP file:
    - Non-data rows (text-only: metadata, resolve references)
    - Archive row (path `""`: index + archive metadata)
 
-3. **Write data rows with adaptive row group sizing:**
+3. **Write the archive row as the first row group.** This is always 1 row
+   (path `""`), contains archive-level metadata, and sits at the start
+   of the file for fast access.
+
+4. **Write all non-data rows as the second row group.** These are small
+   (metadata JSON, resolve dicts) and benefit from being colocated near
+   the start of the file for fast scanning.
+
+5. **Write data rows with adaptive row group sizing:**
    - Accumulate rows until the data column would exceed `TARGET_RG_DATA_BYTES`
      (default 10MB) or the row count exceeds `MAX_RG_ROWS` (default 2000).
    - Flush at that boundary.
    - This naturally adapts: many small blobs → large row groups; few large
      blobs → small row groups.
 
-4. **Write all non-data rows as a single row group.** These are small
-   (metadata JSON, resolve dicts) and benefit from being colocated for
-   fast scanning.
-
-5. **Write the archive row as the final row group.** This is always 1 row
-   and is identified by `path == ""`.
+This metadata-first layout is optimal for HTTP range-request access:
+the parquet footer is at the end (standard), metadata is at the start,
+and blobs are only read on demand from the middle of the file.
 
 ### Parameters
 
