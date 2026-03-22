@@ -115,7 +115,7 @@ class TestBuilder:
         assert "chunk_key" not in pf.schema_arrow.names
 
     def test_sorted_output(self, tmp_path: Path) -> None:
-        """Archive row first, then non-data (text), then data rows."""
+        """Data rows sorted, then non-data sorted, then archive row."""
         builder = Builder()
         builder.add("zarr.json", text='{}')
         builder.add("b/c/0", data=b"\x01")
@@ -124,8 +124,7 @@ class TestBuilder:
         zmp_path = builder.write(tmp_path / "out.zmp")
         manifest = Manifest(str(zmp_path))
         paths = list(manifest.list_paths())
-        # archive first, then non-data sorted, then data sorted
-        assert paths == ["", "zarr.json", "a/c/0", "b/c/0"]
+        assert paths == ["/a/c/0", "/b/c/0", "/zarr.json", ""]
 
     def test_file_level_metadata(self, tmp_path: Path) -> None:
         builder = Builder(
@@ -248,9 +247,9 @@ class TestBuilder:
             table.column("path")[i].as_py(): table.column("addressing")[i].as_py()
             for i in range(len(table))
         }
-        assert set(addr["a"]) == {"T"}
-        assert set(addr["b"]) == {"D"}
-        assert set(addr["c"]) == {"R"}
+        assert set(addr["/a"]) == {"T"}
+        assert set(addr["/b"]) == {"D"}
+        assert set(addr["/c"]) == {"R"}
 
     def test_mount_addressing_flags(self, tmp_path: Path) -> None:
         """Mount entries get MOUNT, FOLDER, RESOLVE flags."""
@@ -295,3 +294,82 @@ class TestBuilder:
         canonical = rfc8785.dumps(json.loads(text))
         expected = git_blob_hash(canonical)
         assert entry.checksum == expected
+
+
+class TestStreamingBuilder:
+    def test_streaming_roundtrip(self, tmp_path: Path) -> None:
+        """Streaming mode writes data rows to disk incrementally."""
+        zmp_path = tmp_path / "out.zmp"
+        with Builder(output=zmp_path) as builder:
+            builder.add("zarr.json", text='{"zarr_format":3,"node_type":"group"}')
+            chunk = np.array([1.0, 2.0], dtype="<f8").tobytes()
+            builder.add("arr/c/0", data=chunk)
+            builder.add("arr/c/1", data=chunk)
+
+        manifest = Manifest(str(zmp_path))
+        assert manifest.has("zarr.json")
+        assert manifest.has("arr/c/0")
+        assert manifest.has("arr/c/1")
+        assert manifest.get_data("arr/c/0") == chunk
+
+    def test_streaming_matches_batch(self, tmp_path: Path) -> None:
+        """Streaming and batch produce equivalent manifests."""
+        chunk = b"\x00" * 100
+
+        # Batch
+        batch_builder = Builder()
+        batch_builder.add("zarr.json", text='{}')
+        for i in range(10):
+            batch_builder.add(f"c/{i}", data=chunk)
+        batch_path = batch_builder.write(tmp_path / "batch.zmp")
+
+        # Streaming
+        stream_path = tmp_path / "stream.zmp"
+        with Builder(output=stream_path) as builder:
+            builder.add("zarr.json", text='{}')
+            for i in range(10):
+                builder.add(f"c/{i}", data=chunk)
+
+        batch_m = Manifest(str(batch_path))
+        stream_m = Manifest(str(stream_path))
+
+        batch_paths = sorted(list(batch_m.list_paths()))
+        stream_paths = sorted(list(stream_m.list_paths()))
+        assert batch_paths == stream_paths
+
+        for p in batch_paths:
+            if p == "":
+                continue
+            b_entry = batch_m.get_entry(p)
+            s_entry = stream_m.get_entry(p)
+            assert b_entry.checksum == s_entry.checksum
+            assert b_entry.size == s_entry.size
+
+    def test_streaming_archive_metadata(self, tmp_path: Path) -> None:
+        """Archive metadata set before data rows."""
+        zmp_path = tmp_path / "out.zmp"
+        with Builder(output=zmp_path) as builder:
+            builder.set_archive_metadata({"modality": "CT"})
+            builder.add("zarr.json", text='{}')
+            builder.add("c/0", data=b"\x00")
+
+        manifest = Manifest(str(zmp_path))
+        am = manifest.archive_metadata
+        assert am is not None
+        assert am["modality"] == "CT"
+
+    def test_streaming_large_does_not_buffer(self, tmp_path: Path) -> None:
+        """Data rows are flushed to disk, not held in memory."""
+        zmp_path = tmp_path / "out.zmp"
+        with Builder(output=zmp_path) as builder:
+            builder.add("zarr.json", text='{}')
+            # Add enough data to trigger at least one flush
+            for i in range(100):
+                builder.add(f"c/{i}", data=b"\x00" * (200 * 1024))  # 200KB each = 20MB total
+            # After 10MB, the buffer should have flushed
+            # (we can't check memory, but we can check the writer exists)
+            assert builder._writer is not None
+
+        manifest = Manifest(str(zmp_path))
+        assert manifest.has("c/50")
+        assert manifest.has("zarr.json")

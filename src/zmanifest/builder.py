@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +13,20 @@ import pyarrow.parquet as pq
 import rfc8785
 
 from ._types import Addressing, compute_addressing
+from .path import ZPath
+
+
+def _to_manifest_path(path: str) -> str:
+    """Normalize a path for storage in the manifest.
+
+    Accepts both ``"/arr/c/0"`` and ``"arr/c/0"``.
+    Returns absolute form ``"/arr/c/0"`` for on-disk storage.
+    The archive row ``""`` passes through unchanged.
+    """
+    if path == "":
+        return ""
+    return str(ZPath(path))
+from .path import ZPath
 
 
 def canonical_json(text: str) -> str:
@@ -31,10 +44,8 @@ def git_blob_hash(content: bytes) -> str:
     return hashlib.sha1(header + content).hexdigest()
 
 
-
-
 # ---------------------------------------------------------------------------
-# Builder — row-level manifest builder
+# Internal row representation
 # ---------------------------------------------------------------------------
 
 
@@ -46,14 +57,14 @@ class _Row:
     content_size: int | None = None
     checksum: str | None = None
     text: str | None = None
-    data: bytes | None = None  # uncompressed binary (parquet compression=none)
-    data_z: bytes | None = None  # compressible binary (parquet compression=zstd)
-    resolve: str | None = None  # JSON string
-    base_resolve: str | None = None  # JSON string
+    data: bytes | None = None
+    data_z: bytes | None = None
+    resolve: str | None = None
+    base_resolve: str | None = None
     content_type: str | None = None
     content_encoding: str | None = None
     source: str | None = None
-    metadata: str | None = None  # JSON string
+    metadata: str | None = None
     is_mount: bool = False
     is_link: bool = False
     is_folder: bool = False
@@ -72,37 +83,173 @@ class _Row:
             is_index=self.is_index,
         )
 
+    @property
+    def has_data(self) -> bool:
+        return self.data is not None or self.data_z is not None
+
+    @property
+    def blob_size(self) -> int:
+        return len(self.data or b"") + len(self.data_z or b"")
+
+
+# ---------------------------------------------------------------------------
+# Parquet schema and writer helpers
+# ---------------------------------------------------------------------------
+
+_SCHEMA = pa.schema([
+    ("path", pa.string()),
+    ("id", pa.string()),
+    ("size", pa.int64()),
+    ("content_size", pa.int64()),
+    ("checksum", pa.string()),
+    ("text", pa.string()),
+    ("data", pa.binary()),
+    ("data_z", pa.binary()),
+    ("resolve", pa.string()),
+    ("base_resolve", pa.string()),
+    ("content_type", pa.string()),
+    ("content_encoding", pa.string()),
+    ("source", pa.string()),
+    ("metadata", pa.string()),
+    ("addressing", pa.string()),
+])
+
+
+def _rows_to_table(rows: list[_Row], schema: pa.Schema) -> pa.Table:
+    """Convert a list of _Row to a pyarrow Table."""
+    def _col(attr: str) -> list[Any]:
+        return [getattr(r, attr) for r in rows]
+
+    return pa.table(
+        {
+            "path": pa.array(_col("path"), type=pa.string()),
+            "id": pa.array(_col("id"), type=pa.string()),
+            "size": pa.array(_col("size"), type=pa.int64()),
+            "content_size": pa.array(_col("content_size"), type=pa.int64()),
+            "checksum": pa.array(_col("checksum"), type=pa.string()),
+            "text": pa.array(_col("text"), type=pa.string()),
+            "data": pa.array(_col("data"), type=pa.binary()),
+            "data_z": pa.array(_col("data_z"), type=pa.binary()),
+            "resolve": pa.array(_col("resolve"), type=pa.string()),
+            "base_resolve": pa.array(_col("base_resolve"), type=pa.string()),
+            "content_type": pa.array(_col("content_type"), type=pa.string()),
+            "content_encoding": pa.array(_col("content_encoding"), type=pa.string()),
+            "source": pa.array(_col("source"), type=pa.string()),
+            "metadata": pa.array(_col("metadata"), type=pa.string()),
+            "addressing": pa.array(
+                [r.addressing for r in rows], type=pa.string()
+            ),
+        },
+        schema=schema,
+    )
+
+
+def _make_file_meta(
+    zarr_format: str,
+    metadata: dict[str, object],
+    base_resolve: dict | None,
+) -> dict[bytes, bytes]:
+    """Build parquet file-level metadata dict."""
+    file_meta: dict[bytes, bytes] = {
+        b"zmp_version": b"0.2.0",
+        b"zarr_format": zarr_format.encode(),
+    }
+    if base_resolve is not None:
+        file_meta[b"base_resolve"] = rfc8785.dumps(base_resolve)
+    for k, v in metadata.items():
+        if isinstance(v, str):
+            file_meta[k.encode()] = v.encode()
+        else:
+            file_meta[k.encode()] = rfc8785.dumps(v)
+    return file_meta
+
+
+def _make_writer(
+    output: str | Path,
+    schema: pa.Schema,
+    data_compression_level: int | None = None,
+) -> pq.ParquetWriter:
+    """Create a ParquetWriter with ZMP conventions."""
+    compression = {col: "zstd" for col in schema.names}
+    compression["data"] = "none"
+    use_dictionary = {col: False for col in schema.names}
+
+    compression_level = None
+    if data_compression_level is not None:
+        compression_level = {"data": data_compression_level}
+
+    return pq.ParquetWriter(
+        str(output),
+        schema,
+        compression=compression,
+        compression_level=compression_level,
+        use_dictionary=use_dictionary,
+        write_page_index=True,
+    )
+
+
+def _canonicalize_row(r: _Row) -> None:
+    """Canonicalize JSON fields in-place for deterministic output."""
+    if r.resolve is not None:
+        r.resolve = rfc8785.dumps(json.loads(r.resolve)).decode("utf-8")
+    if r.base_resolve is not None:
+        r.base_resolve = rfc8785.dumps(json.loads(r.base_resolve)).decode("utf-8")
+    if r.metadata is not None:
+        r.metadata = rfc8785.dumps(json.loads(r.metadata)).decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Builder
+# ---------------------------------------------------------------------------
+
 
 class Builder:
-    """Build a ZMP manifest by adding entries directly.
+    """Build a ZMP manifest by adding entries.
 
-    Unlike store-level builders, this class lets you construct a manifest
-    row by row — useful when building from external sources (DICOM headers,
-    kerchunk references, database queries).
+    Supports two modes:
 
-    JSON content is canonicalized via RFC 8785 before hashing for
-    deterministic git-sha1 retrieval keys.
-
-    Example::
+    **Batch mode** (small manifests)::
 
         builder = Builder()
-        builder.add("zarr.json", text='{"zarr_format":3,"node_type":"group"}')
-        builder.add("temp/zarr.json", text=array_meta_json)
-        builder.add("temp/c/0/0", data=chunk_bytes)
-        builder.add("temp/c/1/0", uri="s3://bucket/file.nc", offset=1024, length=4096)
+        builder.add("zarr.json", text='{...}')
+        builder.add("arr/c/0", data=chunk_bytes)
         builder.write("output.zmp")
 
+    **Streaming mode** (large manifests — data rows stream to disk)::
+
+        with Builder(output="output.zmp") as builder:
+            builder.add("zarr.json", text='{...}')   # buffered (small)
+            builder.add("arr/c/0", data=chunk_bytes)  # streamed to disk
+            builder.add("arr/c/1", data=chunk_bytes)  # streamed to disk
+        # close() flushes remaining data + writes non-data + archive row
+
+    In streaming mode, data rows (those with ``data`` or ``data_z``) are
+    written to the parquet file incrementally with adaptive row group
+    sizing. Non-data rows (text, resolve refs, metadata) are buffered
+    in memory (they're small) and written at close time.
+
+    Row order: data rows (sorted within each row group), then non-data
+    rows (sorted), then the archive row.
+
     Args:
+        output: Path for the output ``.zmp`` file. If provided, enables
+            streaming mode. If None, use :meth:`write` for batch mode.
         zarr_format: Zarr format version (``"2"`` or ``"3"``).
-        retrieval_scheme: Retrieval scheme for file-level metadata.
         data_compression: Parquet compression for the ``data`` column.
         data_compression_level: Compression level for the ``data`` column.
         max_rows_per_group: Override adaptive row group sizing.
         metadata: Additional key-value pairs for file-level metadata.
+        base_resolve: File-level base resolution params.
     """
+
+    # Adaptive row group sizing defaults.
+    # See docs/parquet-layout.md for benchmarks and rationale.
+    _TARGET_RG_DATA_BYTES: int = 10 * 1024 * 1024  # 10 MB of blob data per RG
+    _MAX_RG_ROWS: int = 2000  # cap rows per RG even for tiny blobs
 
     def __init__(
         self,
+        output: str | Path | None = None,
         *,
         zarr_format: str = "3",
         data_compression: str = "none",
@@ -111,19 +258,80 @@ class Builder:
         metadata: dict[str, object] | None = None,
         base_resolve: dict | None = None,
     ) -> None:
+        self._output = Path(output) if output is not None else None
         self._zarr_format = zarr_format
         self._data_compression = data_compression
         self._data_compression_level = data_compression_level
         self._max_rows_per_group = max_rows_per_group
         self._metadata = metadata or {}
         self._base_resolve = base_resolve
-        self._rows: list[_Row] = []
+
+        # Buffered non-data rows (always in memory — they're small)
+        self._non_data_rows: list[_Row] = []
+
+        # Streaming state
+        self._writer: pq.ParquetWriter | None = None
+        self._schema: pa.Schema | None = None
+        self._data_buf: list[_Row] = []  # current RG accumulator
+        self._data_buf_bytes: int = 0
+        self._closed = False
+
+    def __enter__(self) -> Builder:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if not self._closed:
+            self.close()
 
     @staticmethod
     def _encode_metadata(metadata: dict[str, object] | None) -> str | None:
         if metadata is None:
             return None
         return rfc8785.dumps(metadata).decode("utf-8")
+
+    @property
+    def _streaming(self) -> bool:
+        return self._output is not None
+
+    def _ensure_writer(self) -> pq.ParquetWriter:
+        """Lazily create the parquet writer on first data row."""
+        if self._writer is not None:
+            return self._writer
+
+        file_meta = _make_file_meta(
+            self._zarr_format, self._metadata, self._base_resolve,
+        )
+        self._schema = _SCHEMA.with_metadata(file_meta)
+        self._writer = _make_writer(
+            self._output, self._schema, self._data_compression_level,
+        )
+        return self._writer
+
+    def _flush_data_buf(self) -> None:
+        """Write accumulated data rows as one row group."""
+        if not self._data_buf:
+            return
+        writer = self._ensure_writer()
+        # Sort within the row group for optimal column statistics
+        self._data_buf.sort(key=lambda r: r.path)
+        table = _rows_to_table(self._data_buf, self._schema)
+        writer.write_table(table)
+        self._data_buf.clear()
+        self._data_buf_bytes = 0
+
+    def _stream_data_row(self, row: _Row) -> None:
+        """Add a data row to the streaming buffer, flushing if needed."""
+        self._data_buf.append(row)
+        self._data_buf_bytes += row.blob_size
+
+        target = self._max_rows_per_group or self._TARGET_RG_DATA_BYTES
+        max_rows = self._max_rows_per_group or self._MAX_RG_ROWS
+
+        if (self._data_buf_bytes >= self._TARGET_RG_DATA_BYTES
+                or len(self._data_buf) >= max_rows):
+            self._flush_data_buf()
+
+    # -- Public API -----------------------------------------------------------
 
     def set_archive_metadata(
         self,
@@ -135,17 +343,12 @@ class Builder:
 
         This is metadata about the container (e.g. DICOM series UID,
         description, provenance) — not about any path within the archive.
-        Stored on the ``""`` row which also holds the index.
+        Stored on the ``""`` row.
 
         Calling this multiple times replaces the previous value.
-
-        Args:
-            metadata: Archive-level metadata dict.
-            id: Optional short identifier for this row.
         """
         self.set_path_metadata("", metadata, id=id)
 
-    # Keep old name as alias for backward compatibility
     set_root_metadata = set_archive_metadata
 
     def set_path_metadata(
@@ -155,25 +358,13 @@ class Builder:
         *,
         id: str | None = None,
     ) -> None:
-        """Set metadata on a path (group or directory) in the manifest.
+        """Set metadata on a path (group or directory).
 
         Use :meth:`set_archive_metadata` for archive-level metadata.
-        Use this method for group/directory annotations
-        (e.g. ``"temperature"``, ``"scans/ct"``).
-
-        These rows are invisible to the zarr Store interface but queryable
-        via DuckDB or :meth:`Manifest.path_metadata`.
-
-        Args:
-            path: Path for the metadata row, e.g. ``"scans/ct"``.
-                Use :meth:`set_archive_metadata` for archive-level metadata.
-            metadata: Metadata dict (stored as JSON).
-            id: Optional short identifier for this row.
         """
-        path = path.rstrip("/")
-        # Remove any existing row for this path
-        self._rows = [r for r in self._rows if r.path != path]
-        self._rows.append(_Row(
+        path = _to_manifest_path(path)
+        self._non_data_rows = [r for r in self._non_data_rows if r.path != path]
+        self._non_data_rows.append(_Row(
             path=path,
             size=0,
             id=id,
@@ -193,31 +384,13 @@ class Builder:
         base_resolve: dict | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
-        """Mount an external store at a path prefix.
-
-        The mounted store is opened lazily on first access and handles
-        all reads under this prefix. The child manifest can be referenced
-        via ``resolve`` or embedded inline via ``data`` (uncompressed,
-        e.g. a .zmp file) or ``data_z`` (compressible).
-
-        Args:
-            path: Mount point path (trailing ``/`` added if missing).
-            resolve: Resolution dict (e.g. ``{"http": {"url": "child.zmp"}}``).
-            data: Embedded child manifest (uncompressed parquet column).
-            data_z: Embedded child manifest (zstd-compressed parquet column).
-            id: Optional short identifier.
-            content_type: MIME type hint.
-            base_resolve: Default resolution params for entries within
-                the mounted store, keyed by scheme.
-            metadata: Per-entry metadata dict.
-        """
+        """Mount an external store at a path prefix."""
         if data is not None and data_z is not None:
             raise ValueError("Cannot set both data and data_z")
-        path = path.rstrip("/")
+        path = _to_manifest_path(path)
         size = len(data) if data else len(data_z) if data_z else 0
-        # Remove any existing row for this path
-        self._rows = [r for r in self._rows if r.path != path]
-        self._rows.append(_Row(
+        self._non_data_rows = [r for r in self._non_data_rows if r.path != path]
+        self._non_data_rows.append(_Row(
             path=path,
             size=size,
             id=id,
@@ -241,29 +414,14 @@ class Builder:
         content_type: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
-        """Create a link entry that points to another path in the manifest.
-
-        When resolved, the link's content comes from the target entry.
-        If ``folder=True`` (or path ends with ``/``), the link acts as
-        a directory — all sub-paths are rewritten through the target prefix.
-
-        Args:
-            path: The link's path in the manifest.
-            target: Path of the target entry (relative to manifest root).
-            folder: If True, this is a directory link.
-            id: Optional short identifier.
-            content_type: MIME type hint.
-            metadata: Per-entry metadata dict.
-        """
-        # Detect directory link from trailing /
+        """Create a link entry that points to another path."""
         if path.endswith("/"):
             folder = True
-        path = path.rstrip("/")
-        target = target.rstrip("/")
+        path = _to_manifest_path(path)
+        target = _to_manifest_path(target)
         resolve_dict = {"_path": {"target": target}}
-        # Remove any existing row for this path
-        self._rows = [r for r in self._rows if r.path != path]
-        self._rows.append(_Row(
+        self._non_data_rows = [r for r in self._non_data_rows if r.path != path]
+        self._non_data_rows.append(_Row(
             path=path,
             size=0,
             id=id,
@@ -294,34 +452,15 @@ class Builder:
     ) -> None:
         """Add an entry to the manifest.
 
-        Supply one or more addressing sources. The ``addressing`` column
-        is computed automatically from which fields are set.
-
-        Args:
-            path: Store path (e.g. ``"zarr.json"``, ``"arr/c/0/1"``).
-            text: Inline text content.
-            data: Inline binary content (stored uncompressed in parquet).
-                Use for pre-compressed data (zarr chunks, .zmp files, etc.).
-            data_z: Inline binary content (stored with zstd compression in
-                parquet). Use for compressible raw data (uncompressed pixels, etc.).
-            resolve: Resolution dict keyed by scheme
-                (e.g. ``{"http": {"url": "..."}, "git": {"oid": "..."}}``).
-            size: Size in bytes. Auto-computed from ``text``, ``data``,
-                or ``data_z`` if not provided.
-            content_size: Logical/decoded size in bytes (optional).
-            checksum: Content hash for verification.
-            id: Optional short identifier for cross-referencing.
-            content_type: MIME type of the content (e.g. ``"application/json"``).
-            content_encoding: Content encoding (e.g. ``"gzip"``, ``"zstd"``).
-            source: Provenance string.
-            base_resolve: Default resolution params for this entry's
-                scheme-specific resolution, keyed by scheme.
-            metadata: Per-entry metadata dict (stored as JSON).
+        In streaming mode, data rows are written to disk immediately
+        (no buffering). Non-data rows are always buffered.
         """
         if data is not None and data_z is not None:
             raise ValueError("Cannot set both data and data_z")
 
-        # Canonicalize JSON text (by extension or content_type)
+        path = _to_manifest_path(path)
+
+        # Canonicalize JSON text
         if text is not None and (
             path.endswith(".json")
             or (content_type and "json" in content_type)
@@ -342,7 +481,7 @@ class Builder:
             else:
                 size = 0
 
-        # Auto-compute checksum from content
+        # Auto-compute checksum
         if checksum is None:
             if text is not None:
                 checksum = git_blob_hash(text.encode("utf-8"))
@@ -354,7 +493,7 @@ class Builder:
         resolve_json = json.dumps(resolve, separators=(",", ":")) if resolve else None
         base_resolve_json = json.dumps(base_resolve, separators=(",", ":")) if base_resolve else None
 
-        self._rows.append(_Row(
+        row = _Row(
             path=path,
             size=size,
             id=id,
@@ -369,131 +508,115 @@ class Builder:
             content_encoding=content_encoding,
             source=source,
             metadata=self._encode_metadata(metadata),
-        ))
+        )
 
-    # Adaptive row group sizing defaults.
-    # See docs/parquet-layout.md for benchmarks and rationale.
-    _TARGET_RG_DATA_BYTES: int = 10 * 1024 * 1024  # 10 MB of blob data per RG
-    _MAX_RG_ROWS: int = 2000  # cap rows per RG even for tiny blobs
+        if row.has_data and self._streaming:
+            # Stream data rows directly to disk
+            self._stream_data_row(row)
+        else:
+            # Buffer non-data rows (and data rows in batch mode)
+            self._non_data_rows.append(row)
+
+    def close(self) -> Path:
+        """Finish writing the manifest.
+
+        Flushes remaining data rows, writes non-data rows and the
+        archive row, and closes the parquet writer.
+
+        Returns:
+            Path to the written file.
+        """
+        if self._closed:
+            return self._output
+        self._closed = True
+
+        if not self._streaming:
+            raise RuntimeError(
+                "close() requires output path. Use write() for batch mode, "
+                "or pass output= to Builder()."
+            )
+
+        # Flush any remaining data rows
+        self._flush_data_buf()
+
+        # Canonicalize JSON fields in non-data rows
+        for r in self._non_data_rows:
+            _canonicalize_row(r)
+
+        # Separate non-data rows from archive row
+        archive_rows = [r for r in self._non_data_rows if r.path == ""]
+        other_rows = sorted(
+            [r for r in self._non_data_rows if r.path != ""],
+            key=lambda r: r.path,
+        )
+
+        # Ensure archive row exists
+        if not archive_rows:
+            archive_rows = [_Row(path="", size=0, is_folder=True)]
+
+        writer = self._ensure_writer()
+
+        # Write non-data rows as a single row group
+        if other_rows:
+            table = _rows_to_table(other_rows, self._schema)
+            writer.write_table(table)
+
+        # Write archive row as final row group
+        table = _rows_to_table(archive_rows, self._schema)
+        writer.write_table(table)
+
+        writer.close()
+        self._writer = None
+        return self._output
 
     def write(self, output: str | Path) -> Path:
-        """Write the manifest to a ZMP parquet file.
+        """Batch mode: write all buffered rows to a file.
 
-        Row groups are sized adaptively to keep blob-column I/O bounded:
-        each row group accumulates rows until the data column would exceed
-        ``TARGET_RG_DATA_BYTES`` (10 MB) or the row count exceeds
-        ``MAX_RG_ROWS`` (2000). This adapts to mixed blob sizes
-        automatically.
-
-        Row order is deterministic: data rows (sorted by path), then
-        non-data rows (sorted by path), then the archive row.
+        This is a convenience for small manifests where all rows fit
+        in memory. For large manifests, use streaming mode instead
+        (pass ``output=`` to the constructor).
 
         Returns:
             Path to the written file.
         """
         output = Path(output)
 
-        # Ensure the archive row ("") exists — holds archive-level metadata.
-        # Not a path in the hierarchy.
-        has_archive_row = any(r.path == "" for r in self._rows)
-        if not has_archive_row:
-            self._rows.append(_Row(path="", size=0, is_folder=True))
+        # Collect all rows (non-data buffer has everything in batch mode)
+        all_rows = list(self._non_data_rows)
 
-        # Canonicalize all JSON fields for deterministic output
-        for r in self._rows:
-            if r.resolve is not None:
-                r.resolve = rfc8785.dumps(json.loads(r.resolve)).decode("utf-8")
-            if r.base_resolve is not None:
-                r.base_resolve = rfc8785.dumps(json.loads(r.base_resolve)).decode("utf-8")
-            if r.metadata is not None:
-                r.metadata = rfc8785.dumps(json.loads(r.metadata)).decode("utf-8")
+        # Canonicalize JSON fields
+        for r in all_rows:
+            _canonicalize_row(r)
 
-        # Deterministic row order (metadata-first layout):
-        # 1. archive row (path "") — archive metadata, always first
-        # 2. non-data rows (sorted by path) — zarr.json, resolve refs
-        # 3. data/data_z rows (sorted by path) — bulk blobs at end
-        #
-        # This layout puts small metadata near the start of the file,
-        # which is optimal for HTTP range-request access (footer at end,
-        # metadata at start, blobs in the middle/end read on demand).
+        # Ensure archive row exists
+        if not any(r.path == "" for r in all_rows):
+            all_rows.append(_Row(path="", size=0, is_folder=True))
+
+        # Separate into categories
         def _has_data(r: _Row) -> bool:
             return r.data is not None or r.data_z is not None
 
-        archive_rows = [r for r in self._rows if r.path == ""]
+        data_rows = sorted(
+            [r for r in all_rows if _has_data(r)], key=lambda r: r.path
+        )
         non_data_rows = sorted(
-            [r for r in self._rows if not _has_data(r) and r.path != ""],
+            [r for r in all_rows if not _has_data(r) and r.path != ""],
             key=lambda r: r.path,
         )
-        data_rows = sorted(
-            [r for r in self._rows if _has_data(r)], key=lambda r: r.path
+        archive_rows = [r for r in all_rows if r.path == ""]
+        rows = data_rows + non_data_rows + archive_rows
+
+        # Build table
+        file_meta = _make_file_meta(
+            self._zarr_format, self._metadata, self._base_resolve,
         )
-        rows = archive_rows + non_data_rows + data_rows
+        schema = _SCHEMA.with_metadata(file_meta)
+        table = _rows_to_table(rows, schema)
 
-        # Build the table
-        def _col(attr: str) -> list[Any]:
-            return [getattr(r, attr) for r in rows]
-
-        table = pa.table(
-            {
-                "path": pa.array(_col("path"), type=pa.string()),
-                "id": pa.array(_col("id"), type=pa.string()),
-                "size": pa.array(_col("size"), type=pa.int64()),
-                "content_size": pa.array(_col("content_size"), type=pa.int64()),
-                "checksum": pa.array(_col("checksum"), type=pa.string()),
-                "text": pa.array(_col("text"), type=pa.string()),
-                "data": pa.array(_col("data"), type=pa.binary()),
-                "data_z": pa.array(_col("data_z"), type=pa.binary()),
-                "resolve": pa.array(_col("resolve"), type=pa.string()),
-                "base_resolve": pa.array(_col("base_resolve"), type=pa.string()),
-                "content_type": pa.array(_col("content_type"), type=pa.string()),
-                "content_encoding": pa.array(_col("content_encoding"), type=pa.string()),
-                "source": pa.array(_col("source"), type=pa.string()),
-                "metadata": pa.array(_col("metadata"), type=pa.string()),
-                "addressing": pa.array(
-                    [r.addressing for r in rows], type=pa.string()
-                ),
-            }
-        )
-
-        # File-level metadata
-        file_meta: dict[bytes, bytes] = {
-            b"zmp_version": b"0.2.0",
-            b"zarr_format": self._zarr_format.encode(),
-        }
-        if self._base_resolve is not None:
-            file_meta[b"base_resolve"] = rfc8785.dumps(self._base_resolve)
-        for k, v in self._metadata.items():
-            if isinstance(v, str):
-                file_meta[k.encode()] = v.encode()
-            else:
-                file_meta[k.encode()] = rfc8785.dumps(v)
-
-        schema = table.schema.with_metadata(file_meta)
-        table = table.cast(schema)
-
-        # Per-column compression: data is uncompressed (pre-compressed
-        # zarr chunks), everything else is zstd for compact metadata.
-        compression = {col: "zstd" for col in table.schema.names}
-        compression["data"] = "none"
-        # Disable dictionary encoding for unique-value columns
-        use_dictionary = {col: False for col in table.schema.names}
-
-        compression_level = None
-        if self._data_compression_level is not None:
-            compression_level = {"data": self._data_compression_level}
-
-        writer = pq.ParquetWriter(
-            str(output),
-            schema,
-            compression=compression,
-            compression_level=compression_level,
-            use_dictionary=use_dictionary,
-            write_page_index=True,
-        )
+        writer = _make_writer(output, schema, self._data_compression_level)
         try:
             n_data = len(data_rows)
             n_non_data = len(non_data_rows)
-            n_archive = len(archive_rows)
 
             if self._max_rows_per_group is not None:
                 # User override: uniform row group sizing
@@ -505,43 +628,32 @@ class Builder:
                     writer.write_table(table.slice(i, end - i))
                     i = end
             else:
-                # --- Metadata-first layout ---
-                #
-                # 1. Archive row: own row group (first in file)
+                # Adaptive data row groups
                 offset = 0
-                if n_archive > 0:
-                    writer.write_table(table.slice(offset, n_archive))
-                offset += n_archive
-
-                # 2. Non-data rows: single row group (small metadata)
-                if n_non_data > 0:
-                    writer.write_table(table.slice(offset, n_non_data))
-                offset += n_non_data
-
-                # 3. Data rows: adaptive row group sizing.
-                #    Accumulate until data column exceeds TARGET_RG_DATA_BYTES
-                #    or row count exceeds MAX_RG_ROWS. This naturally adapts:
-                #    small blobs → large row groups, large blobs → small.
                 target = self._TARGET_RG_DATA_BYTES
                 max_rows = self._MAX_RG_ROWS
-                rg_start = offset
+                rg_start = 0
                 rg_data_bytes = 0
                 rg_rows = 0
 
                 for i in range(n_data):
-                    blob_size = len(data_rows[i].data or b"") + len(data_rows[i].data_z or b"")
-                    rg_data_bytes += blob_size
+                    rg_data_bytes += data_rows[i].blob_size
                     rg_rows += 1
-
                     if rg_data_bytes >= target or rg_rows >= max_rows:
-                        writer.write_table(table.slice(rg_start, offset + i - rg_start + 1))
-                        rg_start = offset + i + 1
+                        writer.write_table(table.slice(rg_start, i - rg_start + 1))
+                        rg_start = i + 1
                         rg_data_bytes = 0
                         rg_rows = 0
 
-                # Flush remaining data rows
-                if rg_start < offset + n_data:
-                    writer.write_table(table.slice(rg_start, offset + n_data - rg_start))
+                if rg_start < n_data:
+                    writer.write_table(table.slice(rg_start, n_data - rg_start))
+
+                # Non-data rows: single row group
+                if n_non_data > 0:
+                    writer.write_table(table.slice(n_data, n_non_data))
+
+                # Archive row: final row group
+                writer.write_table(table.slice(n_data + n_non_data, len(archive_rows)))
         finally:
             writer.close()
 

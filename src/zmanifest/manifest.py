@@ -9,6 +9,20 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ._types import ManifestMetadata
+from .path import ZPath
+
+
+def _to_manifest_path(path: str) -> str:
+    """Normalize a lookup path to match on-disk format.
+
+    Accepts both ``"/arr/c/0"`` and ``"arr/c/0"``.
+    Returns ``"/arr/c/0"`` (absolute) for manifests with ``/``-prefixed paths,
+    or ``"arr/c/0"`` (bare) for legacy manifests.
+    The archive row ``""`` passes through unchanged.
+    """
+    if path == "":
+        return ""
+    return str(ZPath(path))
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,9 +315,9 @@ class Manifest:
         """Metadata dict from a path annotation row, or None.
 
         For archive-level metadata, use :attr:`archive_metadata`.
-        For group/directory metadata, pass the path (e.g. ``"scans/ct"``).
+        For group/directory metadata, pass the path (e.g. ``"/scans/ct"``).
         """
-        path = path.rstrip("/")
+        path = _to_manifest_path(path)
         idx = self._index.get(path)
         if idx is None:
             return None
@@ -339,7 +353,7 @@ class Manifest:
         if id is not None:
             idx = self._id_index.get(id)
         elif path is not None:
-            idx = self._index.get(path)
+            idx = self._index.get(_to_manifest_path(path))
         else:
             return None
         if idx is None:
@@ -360,7 +374,7 @@ class Manifest:
         return self._entry_at(idx)
 
     def has(self, path: str) -> bool:
-        return path in self._index
+        return _to_manifest_path(path) in self._index
 
     def has_id(self, id: str) -> bool:
         return id in self._id_index
@@ -387,6 +401,7 @@ class Manifest:
         )
 
     def get_entry(self, path: str) -> ManifestEntry | None:
+        path = _to_manifest_path(path)
         # Index fast path
         if hasattr(self, "_indexed_entries"):
             return self._indexed_entries.get(path)
@@ -404,6 +419,7 @@ class Manifest:
         """
         if not self._has_data_column and not self._has_data_z_column:
             return None
+        path = _to_manifest_path(path)
         idx = self._index.get(path)
         if idx is None:
             return None
@@ -458,30 +474,37 @@ class Manifest:
         yield from self._index
 
     def list_prefix(self, prefix: str) -> Iterator[str]:
+        zprefix = ZPath(prefix) if prefix and prefix != "" else ZPath.ROOT
         for p in self._index:
-            if p.startswith(prefix):
+            if p == "":
+                continue
+            zp = ZPath(p)
+            if zp.is_equal_or_child_of(zprefix):
                 yield p
 
     def list_dir(self, prefix: str) -> Iterator[str]:
         """List immediate children under a prefix (like a directory listing).
 
-        For prefix ``""``, lists top-level entries.
-        For prefix ``"group"``, lists entries directly in that group.
-
+        For prefix ``"/"``, lists top-level entries.
         Annotation/folder rows are excluded from iteration.
+
+        Yields child names (not full paths): files as ``"name"``,
+        subdirectories as ``"name/"``.
         """
-        prefix = prefix.rstrip("/")
-        search_prefix = prefix + "/" if prefix else ""
+        zprefix = ZPath(prefix) if prefix and prefix != "" else ZPath.ROOT
 
         seen: set[str] = set()
         for p in self._index:
-            if self._is_annotation(p):
+            if p == "" or self._is_annotation(p):
                 continue
-            if not p.startswith(search_prefix):
+            zp = ZPath(p)
+            child = zp.child_name_under(zprefix)
+            if child is None:
                 continue
-            rest = p[len(search_prefix):]
-            slash_idx = rest.find("/")
-            entry = rest if slash_idx == -1 else rest[: slash_idx + 1]
+            # Check if child is a leaf or has deeper entries
+            rel = zp.relative_to(zprefix)
+            is_dir = "/" in rel
+            entry = child + "/" if is_dir else child
             if entry not in seen:
                 seen.add(entry)
                 yield entry
