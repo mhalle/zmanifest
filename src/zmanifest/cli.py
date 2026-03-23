@@ -605,12 +605,12 @@ _TIFF_ENCODINGS: dict[int, str | None] = {
 @cli.command("import-tiff")
 @click.argument("tiff_path")
 @click.argument("output", type=click.Path())
-@click.option("--array-name", "-n", default="volume",
-              help="Name for the zarr array (default: volume).")
+@click.option("--path", "-p", default=None,
+              help="Array path within the archive (default: top-level).")
 @click.option("--zarr-format", default="3", help="Zarr format version.")
 @click.pass_context
 def import_tiff(ctx: click.Context, tiff_path: str, output: str,
-                array_name: str, zarr_format: str) -> None:
+                path: str | None, zarr_format: str) -> None:
     """Create a virtual .zmp from a TIFF file.
 
     Each TIFF strip or tile becomes a virtual chunk referencing
@@ -718,11 +718,16 @@ def import_tiff(ctx: click.Context, tiff_path: str, output: str,
         "pages": len(t.pages),
     })
 
-    # Group metadata
-    builder.add("/zarr.json", text=json.dumps({
-        "zarr_format": 3,
-        "node_type": "group",
-    }))
+    # Compute path prefix for array
+    if path:
+        # Array under a group: /group/zarr.json + /group/array/zarr.json
+        prefix = "/" + path.strip("/")
+        builder.add("/zarr.json", text=json.dumps({
+            "zarr_format": 3, "node_type": "group",
+        }))
+    else:
+        # Top-level array: /zarr.json is the array itself
+        prefix = ""
 
     # Determine chunk shape from strip/tile layout
     if page0.is_tiled:
@@ -735,7 +740,7 @@ def import_tiff(ctx: click.Context, tiff_path: str, output: str,
     chunk_shape = [1, chunk_y, chunk_x]
 
     # Array metadata
-    builder.add(f"/{array_name}/zarr.json", text=json.dumps({
+    builder.add(f"{prefix}/zarr.json", text=json.dumps({
         "zarr_format": 3,
         "node_type": "array",
         "shape": shape,
@@ -763,13 +768,13 @@ def import_tiff(ctx: click.Context, tiff_path: str, output: str,
                 tiles_x = (p.shape[-1] + chunk_x - 1) // chunk_x
                 ty = strip_idx // tiles_x
                 tx = strip_idx % tiles_x
-                chunk_path = f"/{array_name}/c/{page_idx}/{ty}/{tx}"
+                chunk_path = f"{prefix}/c/{page_idx}/{ty}/{tx}"
                 rows = min(chunk_y, p.shape[-2] - ty * chunk_y)
                 cols = min(chunk_x, p.shape[-1] - tx * chunk_x)
                 decompressed_size = rows * cols * p.dtype.itemsize
             else:
                 # Strips: chunk key is page/strip/0 (x is always 0)
-                chunk_path = f"/{array_name}/c/{page_idx}/{strip_idx}/0"
+                chunk_path = f"{prefix}/c/{page_idx}/{strip_idx}/0"
                 start_row = strip_idx * page0.rowsperstrip
                 end_row = min(start_row + page0.rowsperstrip, p.shape[-2])
                 rows = end_row - start_row
