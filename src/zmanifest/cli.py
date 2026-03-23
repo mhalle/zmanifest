@@ -428,6 +428,127 @@ def create(ctx: click.Context, output: str, files: tuple[str, ...],
 
 
 # ---------------------------------------------------------------------------
+# import-zip
+# ---------------------------------------------------------------------------
+
+
+# Map zipfile compression methods to content_encoding values
+_ZIP_ENCODINGS = {
+    0: None,        # ZIP_STORED — no compression
+    8: "deflate",   # ZIP_DEFLATED
+    12: "bz2",      # ZIP_BZIP2
+    14: "lzma",     # ZIP_LZMA
+}
+
+
+def _zip_data_offset(info: Any) -> int:
+    """Compute the byte offset of the compressed data within a zip file.
+
+    The local file header is 30 bytes + filename length + extra field length,
+    followed by the compressed data.
+    """
+    return info.header_offset + 30 + len(info.filename.encode("utf-8")) + len(info.extra)
+
+
+@cli.command("import-zip")
+@click.argument("zipfile_path", type=click.Path(exists=True))
+@click.argument("output", type=click.Path())
+@click.option("--virtual", is_flag=True,
+              help="Keep data in the zip file (store offset/length references).")
+@click.option("--zarr-format", default="3", help="Zarr format version.")
+@click.option("--prefix", "-p", default=None,
+              help="Only import entries under this prefix within the zip.")
+@click.pass_context
+def import_zip(ctx: click.Context, zipfile_path: str, output: str,
+               virtual: bool, zarr_format: str, prefix: str | None) -> None:
+    """Import entries from a zip file into a .zmp manifest.
+
+    By default, extracts and inlines all zip entries. With --virtual,
+    stores byte-range references back into the zip file instead, using
+    base_resolve to avoid repeating the zip path in every entry.
+
+    Works with .zarr.zip files (zarr archives) and any other zip.
+    """
+    import zipfile as zf
+
+    verbose = ctx.obj.get("verbose", False)
+    quiet = ctx.obj.get("quiet", False)
+
+    zip_path = Path(zipfile_path).resolve()
+
+    if virtual:
+        builder = Builder(
+            zarr_format=zarr_format,
+            base_resolve={"http": {"url": str(zip_path)}},
+        )
+    else:
+        builder = Builder(zarr_format=zarr_format)
+
+    count = 0
+    with zf.ZipFile(str(zip_path), "r") as archive:
+        for info in archive.infolist():
+            # Skip directories
+            if info.is_dir():
+                continue
+
+            name = info.filename
+            if prefix and not name.startswith(prefix):
+                continue
+
+            archive_path = "/" + name
+
+            # JSON files are always inlined as text (small, needed for
+            # zarr structure discovery)
+            if name.endswith(".json"):
+                data = archive.read(name)
+                try:
+                    builder.add(archive_path, text=data.decode("utf-8"))
+                except UnicodeDecodeError:
+                    builder.add(archive_path, data=data)
+                count += 1
+                if verbose:
+                    click.echo(f"  {archive_path} ({len(data)} bytes, text)", err=True)
+                continue
+
+            if virtual:
+                # Store reference into the zip file
+                encoding = _ZIP_ENCODINGS.get(info.compress_type)
+                if encoding is None and info.compress_type != 0:
+                    # Unknown compression — fall back to inline
+                    builder.add(archive_path, data=archive.read(name))
+                elif info.compress_type == 0:
+                    # Stored (no compression) — reference with no encoding
+                    data_offset = _zip_data_offset(info)
+                    builder.add(
+                        archive_path,
+                        resolve={"http": {"offset": data_offset, "length": info.file_size}},
+                        size=info.file_size,
+                    )
+                else:
+                    # Compressed — reference with content_encoding
+                    data_offset = _zip_data_offset(info)
+                    builder.add(
+                        archive_path,
+                        resolve={"http": {"offset": data_offset, "length": info.compress_size}},
+                        content_encoding=encoding,
+                        size=info.file_size,
+                    )
+            else:
+                # Inline mode — extract and store
+                builder.add(archive_path, data=archive.read(name))
+
+            count += 1
+            if verbose:
+                mode = "ref" if virtual else "inline"
+                click.echo(f"  {archive_path} ({info.file_size} bytes, {mode})", err=True)
+
+    result = builder.write(output)
+    if not quiet:
+        mode = "virtual" if virtual else "inline"
+        click.echo(f"Imported {count} entries from {zipfile_path} ({mode}) to {result}", err=True)
+
+
+# ---------------------------------------------------------------------------
 # hash / dehydrate / hydrate
 # ---------------------------------------------------------------------------
 
