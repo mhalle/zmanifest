@@ -589,6 +589,223 @@ def import_zip(ctx: click.Context, zipfile_path: str, output: str,
 
 
 # ---------------------------------------------------------------------------
+# import-tiff
+# ---------------------------------------------------------------------------
+
+# Map TIFF compression tags to content_encoding values
+_TIFF_ENCODINGS: dict[int, str | None] = {
+    1: None,        # Uncompressed
+    5: None,        # LZW — no streaming decode, must inline
+    7: None,        # JPEG — would need jpeg content_encoding
+    8: "zlib",      # Deflate (zlib-wrapped)
+    32946: "zlib",  # PKZIP-style deflate (same as 8)
+}
+
+
+@cli.command("import-tiff")
+@click.argument("tiff_path")
+@click.argument("output", type=click.Path())
+@click.option("--array-name", "-n", default="volume",
+              help="Name for the zarr array (default: volume).")
+@click.option("--zarr-format", default="3", help="Zarr format version.")
+@click.pass_context
+def import_tiff(ctx: click.Context, tiff_path: str, output: str,
+                array_name: str, zarr_format: str) -> None:
+    """Create a virtual .zmp from a TIFF file.
+
+    Each TIFF strip or tile becomes a virtual chunk referencing
+    byte ranges in the original TIFF file. The TIFF pixel data is
+    NOT copied — the .zmp is a lightweight index (~100KB) that
+    enables zarr-style random access to the TIFF.
+
+    Supports local files and remote URLs (requires server to support
+    HTTP range requests).
+
+    The resulting array can be read via zarr through zarr-zmp::
+
+        from zarr_zmp import ZMPStore
+        store = ZMPStore.from_file("output.zmp")
+        arr = zarr.open_group(store=store, mode="r")["volume"]
+        cube = arr[100:105, 200:210, 300:310]
+    """
+    try:
+        import tifffile
+    except ImportError:
+        raise click.ClickException("tifffile is required: pip install tifffile")
+
+    verbose = ctx.obj.get("verbose", False)
+    quiet = ctx.obj.get("quiet", False)
+
+    is_remote = tiff_path.startswith(("http://", "https://"))
+
+    if is_remote:
+        # Check range request support before attempting
+        import httpx
+        try:
+            resp = httpx.head(tiff_path, follow_redirects=True, timeout=30)
+        except Exception:
+            # HEAD failed — try a small range GET
+            try:
+                resp = httpx.get(tiff_path, headers={"Range": "bytes=0-3"},
+                                 follow_redirects=True, timeout=30)
+                if resp.status_code not in (200, 206):
+                    raise click.ClickException(
+                        f"Server returned {resp.status_code}. "
+                        "Cannot access remote TIFF without range request support."
+                    )
+            except Exception as e:
+                raise click.ClickException(f"Cannot access remote TIFF: {e}")
+
+        if resp.headers.get("accept-ranges", "").lower() == "none":
+            raise click.ClickException(
+                "Server does not support range requests. "
+                "Download the TIFF locally first, then import."
+            )
+
+        if not quiet:
+            click.echo(f"Reading TIFF headers from {tiff_path}...", err=True)
+
+        try:
+            import fsspec
+            f = fsspec.open(tiff_path, "rb").open()
+            t = tifffile.TiffFile(f)
+        except Exception as e:
+            raise click.ClickException(f"Cannot read remote TIFF: {e}")
+        resolve_url = tiff_path
+    else:
+        local = Path(tiff_path)
+        if not local.exists():
+            raise click.ClickException(f"File not found: {tiff_path}")
+        t = tifffile.TiffFile(str(local))
+        resolve_url = str(local.resolve())
+
+    # Validate TIFF structure
+    if len(t.pages) == 0:
+        raise click.ClickException("TIFF has no pages")
+
+    page0 = t.pages[0]
+    series = t.series[0] if t.series else None
+    shape = list(series.shape) if series else [len(t.pages)] + list(page0.shape)
+    dtype = str(series.dtype) if series else str(page0.dtype)
+
+    # Check compression
+    compression = page0.compression
+    encoding = _TIFF_ENCODINGS.get(compression)
+    if compression not in _TIFF_ENCODINGS:
+        raise click.ClickException(
+            f"Unsupported TIFF compression: {compression}. "
+            f"Supported: {list(_TIFF_ENCODINGS.keys())}"
+        )
+
+    if not quiet:
+        click.echo(
+            f"TIFF: {shape} {dtype}, {len(t.pages)} pages, "
+            f"compression={'none' if encoding is None else encoding}",
+            err=True,
+        )
+
+    # Build manifest
+    builder = Builder(
+        zarr_format=zarr_format,
+        base_resolve={"http": {"url": resolve_url}},
+    )
+
+    builder.set_archive_metadata({
+        "source": tiff_path,
+        "format": "TIFF",
+        "shape": shape,
+        "dtype": dtype,
+        "pages": len(t.pages),
+    })
+
+    # Group metadata
+    builder.add("/zarr.json", text=json.dumps({
+        "zarr_format": 3,
+        "node_type": "group",
+    }))
+
+    # Determine chunk shape from strip/tile layout
+    if page0.is_tiled:
+        chunk_y = page0.tilelength
+        chunk_x = page0.tilewidth
+    else:
+        chunk_y = page0.rowsperstrip
+        chunk_x = page0.shape[-1]  # full width for strips
+
+    chunk_shape = [1, chunk_y, chunk_x]
+
+    # Array metadata
+    builder.add(f"/{array_name}/zarr.json", text=json.dumps({
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": shape,
+        "data_type": dtype,
+        "chunk_grid": {
+            "name": "regular",
+            "configuration": {"chunk_shape": chunk_shape},
+        },
+        "chunk_key_encoding": {
+            "name": "default",
+            "configuration": {"separator": "/"},
+        },
+        "fill_value": 0,
+        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+    }))
+
+    # Map strips/tiles to virtual chunks
+    count = 0
+    for page_idx, p in enumerate(t.pages):
+        for strip_idx, (offset, nbytes) in enumerate(
+            zip(p.dataoffsets, p.databytecounts)
+        ):
+            if p.is_tiled:
+                # Tiles: compute y,x tile indices
+                tiles_x = (p.shape[-1] + chunk_x - 1) // chunk_x
+                ty = strip_idx // tiles_x
+                tx = strip_idx % tiles_x
+                chunk_path = f"/{array_name}/c/{page_idx}/{ty}/{tx}"
+                rows = min(chunk_y, p.shape[-2] - ty * chunk_y)
+                cols = min(chunk_x, p.shape[-1] - tx * chunk_x)
+                decompressed_size = rows * cols * p.dtype.itemsize
+            else:
+                # Strips: chunk key is page/strip/0 (x is always 0)
+                chunk_path = f"/{array_name}/c/{page_idx}/{strip_idx}/0"
+                start_row = strip_idx * page0.rowsperstrip
+                end_row = min(start_row + page0.rowsperstrip, p.shape[-2])
+                rows = end_row - start_row
+                decompressed_size = rows * p.shape[-1] * p.dtype.itemsize
+
+            if encoding is not None:
+                builder.add(
+                    chunk_path,
+                    resolve={"http": {"offset": int(offset), "length": int(nbytes)}},
+                    content_encoding=encoding,
+                    size=decompressed_size,
+                )
+            else:
+                # Uncompressed — no content_encoding needed
+                builder.add(
+                    chunk_path,
+                    resolve={"http": {"offset": int(offset), "length": int(nbytes)}},
+                    size=decompressed_size,
+                )
+
+            count += 1
+            if verbose and count % 1000 == 0:
+                click.echo(f"  {count} chunks...", err=True)
+
+    result = builder.write(output)
+
+    import os
+    if not quiet:
+        click.echo(
+            f"Created {result} ({os.path.getsize(result) / 1024:.1f} KB, "
+            f"{count} virtual chunks from {len(t.pages)} pages)",
+            err=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # hash / dehydrate / hydrate
 # ---------------------------------------------------------------------------
 
