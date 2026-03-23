@@ -440,6 +440,9 @@ class Builder:
         text: str | None = None,
         data: bytes | None = None,
         data_z: bytes | None = None,
+        url: str | None = None,
+        offset: int | None = None,
+        length: int | None = None,
         resolve: dict | None = None,
         size: int | None = None,
         content_size: int | None = None,
@@ -462,7 +465,23 @@ class Builder:
             text: Inline text content.
             data: Inline binary content (uncompressed parquet column).
             data_z: Inline binary content (zstd parquet column).
-            resolve: Resolution dict keyed by scheme.
+            url: Shortcut for HTTP/file references. Builds the resolve
+                dict automatically. Use with ``offset`` and ``length``
+                for byte-range references::
+
+                    builder.add("/c/0", url="https://example.com/data.bin",
+                                offset=1024, length=4096)
+
+                Equivalent to::
+
+                    builder.add("/c/0", resolve={"http": {
+                        "url": "https://example.com/data.bin",
+                        "offset": 1024, "length": 4096}})
+
+            offset: Byte offset within the URL resource (used with ``url``).
+            length: Byte length within the URL resource (used with ``url``).
+            resolve: Resolution dict keyed by scheme. Cannot be combined
+                with ``url``.
             size: Logical (decompressed) size in bytes. Auto-computed
                 from content if not provided.
             content_size: Size of the stored/compressed bytes (optional).
@@ -483,6 +502,22 @@ class Builder:
             base_resolve: Default resolution params for this entry.
             metadata: Per-entry metadata dict.
         """
+        # Build resolve dict from url shortcut
+        if url is not None:
+            if resolve is not None:
+                raise ValueError("Cannot set both url and resolve")
+            http_params: dict[str, Any] = {"url": url}
+            if offset is not None:
+                http_params["offset"] = offset
+            if length is not None:
+                http_params["length"] = length
+            resolve = {"http": http_params}
+            # Auto-set size from length if not provided
+            if size is None and length is not None and content_encoding is None:
+                size = length
+        elif offset is not None or length is not None:
+            raise ValueError("offset and length require url")
+
         if data is not None and data_z is not None:
             raise ValueError("Cannot set both data and data_z")
         if compress is not None and content_encoding is not None:

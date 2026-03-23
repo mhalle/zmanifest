@@ -54,6 +54,67 @@ class TestBuilder:
         assert resolve["http"]["offset"] == 1024
         assert entry.size == 4096
 
+    def test_url_shortcut(self, tmp_path: Path) -> None:
+        """url= shortcut builds resolve dict automatically."""
+        builder = Builder()
+        builder.add("zarr.json", text='{}')
+        builder.add(
+            "arr/c/0",
+            url="s3://bucket/file.nc",
+            offset=1024,
+            length=4096,
+        )
+        zmp_path = builder.write(tmp_path / "out.zmp")
+        manifest = Manifest(str(zmp_path))
+
+        entry = manifest.get_entry("arr/c/0")
+        assert entry is not None
+        resolve = json.loads(entry.resolve)
+        assert resolve["http"]["url"] == "s3://bucket/file.nc"
+        assert resolve["http"]["offset"] == 1024
+        assert resolve["http"]["length"] == 4096
+        assert entry.size == 4096  # auto-set from length
+
+    def test_url_shortcut_no_range(self, tmp_path: Path) -> None:
+        """url= without offset/length is a whole-file reference."""
+        builder = Builder()
+        builder.add("arr/c/0", url="https://example.com/chunk.bin", size=1000)
+        zmp_path = builder.write(tmp_path / "out.zmp")
+        manifest = Manifest(str(zmp_path))
+
+        entry = manifest.get_entry("arr/c/0")
+        resolve = json.loads(entry.resolve)
+        assert resolve["http"]["url"] == "https://example.com/chunk.bin"
+        assert "offset" not in resolve["http"]
+        assert entry.size == 1000
+
+    def test_url_shortcut_with_encoding(self, tmp_path: Path) -> None:
+        """url= with content_encoding doesn't auto-set size from length."""
+        builder = Builder()
+        builder.add(
+            "arr/c/0",
+            url="data.zip",
+            offset=100,
+            length=500,
+            content_encoding="deflate",
+            size=4096,  # logical size, not transfer size
+        )
+        zmp_path = builder.write(tmp_path / "out.zmp")
+        manifest = Manifest(str(zmp_path))
+
+        entry = manifest.get_entry("arr/c/0")
+        assert entry.size == 4096  # logical, not 500
+
+    def test_url_and_resolve_raises(self, tmp_path: Path) -> None:
+        builder = Builder()
+        with pytest.raises(ValueError, match="Cannot set both url and resolve"):
+            builder.add("x", url="http://x", resolve={"http": {"url": "y"}})
+
+    def test_offset_without_url_raises(self, tmp_path: Path) -> None:
+        builder = Builder()
+        with pytest.raises(ValueError, match="offset and length require url"):
+            builder.add("x", offset=0, size=100)
+
     def test_ref_entries(self, tmp_path: Path) -> None:
         """Reference entries have checksum but no inline data."""
         builder = Builder()
