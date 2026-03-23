@@ -35,7 +35,9 @@ class ManifestEntry:
             receives after content decoding.
         content_size: Stored (compressed) size in bytes — what's on disk
             or over the wire. None if not compressed or not known.
-        checksum: Content hash (git-sha1 of uncompressed content).
+        checksum: Content hash (git-sha1). When using ``compress=`` in
+            the builder, this is the hash of the data before compression.
+            Otherwise, it's the hash of the bytes as stored.
         content_encoding: Transport-level compression (e.g. ``"deflate"``,
             ``"zstd"``). The resolve pipeline decompresses automatically.
             See :class:`~zmanifest.ContentEncoding`.
