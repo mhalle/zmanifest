@@ -39,8 +39,8 @@ class HttpResolver:
     async def resolve(self, params: dict, bases: list[dict] | None = None) -> bytes | None:
         from .resolve import _extract_multipart_frame
 
-        url = params.get("url")
-        if url is None:
+        url = params.get("url", "")
+        if not url and not bases:
             return None
 
         # Compose the base chain: resolve each relative base against
