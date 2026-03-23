@@ -41,6 +41,32 @@ _DECOMPRESSORS["zstd"] = zstandard.decompress
 _DECOMPRESSORS["lz4"] = lz4.frame.decompress
 _DECOMPRESSORS["br"] = brotli.decompress
 
+# Compressors — used by Builder.add(compress=...) to compress on ingest
+_COMPRESSORS: dict[str, Any] = {
+    "deflate": lambda data: zlib.compress(data)[2:-4],  # strip zlib header/trailer
+    "gzip": gzip.compress,
+    "zlib": zlib.compress,
+    "bz2": bz2.compress,
+    "lzma": lzma.compress,
+    "zstd": zstandard.compress,
+    "lz4": lz4.frame.compress,
+    "br": brotli.compress,
+}
+
+
+def _encode_content(data: bytes, encoding: str) -> bytes:
+    """Compress data with the given encoding.
+
+    Raises ValueError for unsupported encodings.
+    """
+    compressor = _COMPRESSORS.get(encoding)
+    if compressor is None:
+        raise ValueError(
+            f"Unsupported content_encoding: {encoding!r}. "
+            f"Available: {', '.join(sorted(_COMPRESSORS))}"
+        )
+    return compressor(data)
+
 
 def _decode_content(data: bytes, encoding: str | None) -> bytes:
     """Decompress data based on content_encoding.

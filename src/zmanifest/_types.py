@@ -55,3 +55,21 @@ class Addressing(enum.StrEnum):
     MOUNT = "M"
     FOLDER = "F"
     INDEX = "I"
+
+
+class ContentEncoding(enum.StrEnum):
+    """Transport-level compression encoding.
+
+    Used in ``content_encoding`` to indicate that stored/fetched bytes
+    are compressed and need decompression before use. The resolve pipeline
+    handles this transparently.
+    """
+
+    DEFLATE = "deflate"   # Raw deflate (zip default, HTTP)
+    GZIP = "gzip"         # Deflate + gzip header (HTTP, .gz files)
+    ZLIB = "zlib"         # Deflate + zlib header
+    BZ2 = "bz2"           # Bzip2 (zip method 12, .bz2 files)
+    LZMA = "lzma"         # LZMA (zip method 14, .xz files)
+    ZSTD = "zstd"         # Zstandard (modern zip, HTTP)
+    LZ4 = "lz4"           # LZ4 frame format
+    BR = "br"             # Brotli (HTTP)

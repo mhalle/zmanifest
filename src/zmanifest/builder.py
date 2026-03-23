@@ -12,8 +12,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import rfc8785
 
-from ._types import Addressing, compute_addressing
+from ._types import Addressing, ContentEncoding, compute_addressing
 from .path import ZPath
+from .resolve import _encode_content
 
 
 def _to_manifest_path(path: str) -> str:
@@ -445,7 +446,8 @@ class Builder:
         checksum: str | None = None,
         id: str | None = None,
         content_type: str | None = None,
-        content_encoding: str | None = None,
+        content_encoding: str | ContentEncoding | None = None,
+        compress: str | ContentEncoding | None = None,
         source: str | None = None,
         base_resolve: dict | None = None,
         metadata: dict[str, object] | None = None,
@@ -454,9 +456,61 @@ class Builder:
 
         In streaming mode, data rows are written to disk immediately
         (no buffering). Non-data rows are always buffered.
+
+        Args:
+            path: Store path (e.g. ``"/zarr.json"``, ``"/arr/c/0"``).
+            text: Inline text content.
+            data: Inline binary content (uncompressed parquet column).
+            data_z: Inline binary content (zstd parquet column).
+            resolve: Resolution dict keyed by scheme.
+            size: Logical (decompressed) size in bytes. Auto-computed
+                from content if not provided.
+            content_size: Size of the stored/compressed bytes (optional).
+            checksum: Content hash. Auto-computed if not provided.
+            id: Optional short identifier.
+            content_type: MIME type (e.g. ``"application/json"``).
+            content_encoding: Encoding of the data as stored. Set this
+                when data is already compressed (e.g. from a zip file).
+                Accepts :class:`ContentEncoding` or a string.
+            compress: Compress the data on ingest. The uncompressed data
+                is passed in ``data``, and the builder compresses it,
+                stores the compressed bytes, and sets ``content_encoding``
+                automatically. Accepts :class:`ContentEncoding` or a
+                string (e.g. ``"deflate"``, ``"zstd"``).
+                Cannot be used with ``content_encoding`` (data is already
+                compressed) or ``data_z`` (parquet-level compression).
+            source: Provenance string.
+            base_resolve: Default resolution params for this entry.
+            metadata: Per-entry metadata dict.
         """
         if data is not None and data_z is not None:
             raise ValueError("Cannot set both data and data_z")
+        if compress is not None and content_encoding is not None:
+            raise ValueError(
+                "Cannot set both compress and content_encoding. "
+                "Use compress to compress on ingest, or content_encoding "
+                "when data is already compressed."
+            )
+        if compress is not None and data_z is not None:
+            raise ValueError("Cannot use compress with data_z")
+
+        # Compress on ingest
+        if compress is not None and data is not None:
+            encoding = str(ContentEncoding(compress))
+            uncompressed_size = len(data)
+            checksum = checksum or git_blob_hash(data)
+            data = _encode_content(data, encoding)
+            content_encoding = encoding
+            # size = logical (decompressed) size
+            if size is None:
+                size = uncompressed_size
+            # content_size = compressed size on disk
+            if content_size is None:
+                content_size = len(data)
+
+        # Normalize content_encoding to string
+        if content_encoding is not None:
+            content_encoding = str(ContentEncoding(content_encoding))
 
         path = _to_manifest_path(path)
 
@@ -470,7 +524,7 @@ class Builder:
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
 
-        # Auto-compute size
+        # Auto-compute size (logical size — decompressed if encoded)
         if size is None:
             if text is not None:
                 size = len(text.encode("utf-8"))
@@ -481,7 +535,7 @@ class Builder:
             else:
                 size = 0
 
-        # Auto-compute checksum
+        # Auto-compute checksum (of stored bytes, not decompressed)
         if checksum is None:
             if text is not None:
                 checksum = git_blob_hash(text.encode("utf-8"))
