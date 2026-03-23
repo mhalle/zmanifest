@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.15.1 (2026-03-22)
+
+### Features
+
+- **`zmp show`**: Full detail for a single entry as JSON.
+- **README rewrite**: Updated for current API, CLI docs, correct schema.
+
 ## v0.15.0 (2026-03-22)
 
 ### Features
