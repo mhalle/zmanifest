@@ -187,6 +187,24 @@ def list_cmd(ctx: click.Context, file: str, long: bool, prefix: str | None, as_j
 
 
 # ---------------------------------------------------------------------------
+# show
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("file", type=click.Path(exists=True))
+@click.argument("path")
+@click.pass_context
+def show(ctx: click.Context, file: str, path: str) -> None:
+    """Show full detail for a single entry as JSON."""
+    m = _open_manifest(file)
+    entry = m.get_entry(path)
+    if entry is None:
+        raise click.ClickException(f"Path not found: {path}")
+    click.echo(json.dumps(_entry_to_dict(entry), indent=2))
+
+
+# ---------------------------------------------------------------------------
 # cat
 # ---------------------------------------------------------------------------
 

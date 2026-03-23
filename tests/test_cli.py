@@ -86,6 +86,34 @@ class TestList:
         assert all("path" in e for e in entries)
 
 
+class TestShow:
+    def test_show_text_entry(self, runner: CliRunner, sample_zmp: Path) -> None:
+        result = runner.invoke(cli, ["show", str(sample_zmp), "/zarr.json"])
+        assert result.exit_code == 0
+        obj = json.loads(result.output)
+        assert obj["path"] == "/zarr.json"
+        assert "T" in obj["addressing"]
+        assert "checksum" in obj
+        assert "size" in obj
+
+    def test_show_data_entry(self, runner: CliRunner, sample_zmp: Path) -> None:
+        result = runner.invoke(cli, ["show", str(sample_zmp), "/arr/c/0"])
+        assert result.exit_code == 0
+        obj = json.loads(result.output)
+        assert obj["path"] == "/arr/c/0"
+        assert "D" in obj["addressing"]
+
+    def test_show_virtual_entry(self, runner: CliRunner, sample_zmp: Path) -> None:
+        result = runner.invoke(cli, ["show", str(sample_zmp), "/virtual/c/0"])
+        assert result.exit_code == 0
+        obj = json.loads(result.output)
+        assert "resolve" in obj
+
+    def test_show_missing(self, runner: CliRunner, sample_zmp: Path) -> None:
+        result = runner.invoke(cli, ["show", str(sample_zmp), "/nope"])
+        assert result.exit_code != 0
+
+
 class TestCat:
     def test_cat_text(self, runner: CliRunner, sample_zmp: Path) -> None:
         result = runner.invoke(cli, ["cat", str(sample_zmp), "/zarr.json"])
