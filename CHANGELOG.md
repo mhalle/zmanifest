@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.12.1 (2026-03-22)
+
+### Features
+
+- **Content encoding**: The resolve pipeline now decompresses data based
+  on the `content_encoding` column. Supports `deflate`, `gzip`, `zlib`,
+  `bz2`, `lzma` (stdlib), plus `zstd`, `lz4`, `br` (optional pip deps).
+  This enables transparent access to data stored in zip files or fetched
+  from HTTP with compressed transfer encoding — no zarr codec changes
+  needed.
+- See `docs/content-encoding.md` for usage and examples.
+
 ## v0.12.0 (2026-03-22)
 
 ### Breaking changes

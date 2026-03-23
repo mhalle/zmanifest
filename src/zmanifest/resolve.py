@@ -2,10 +2,75 @@
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import json
+import lzma
+import zlib
 from typing import Any, Protocol, runtime_checkable
 
 from .manifest import Manifest, ManifestEntry
+
+
+# ---------------------------------------------------------------------------
+# Content decoding (transport-level decompression)
+# ---------------------------------------------------------------------------
+
+# Maps content_encoding values to decompressor functions.
+# These handle data that arrived already compressed from an external source
+# (zip files, HTTP responses, pre-compressed blobs) — not to be confused
+# with parquet column compression (data_z) or zarr codec pipelines.
+_DECOMPRESSORS: dict[str, Any] = {
+    # Raw deflate (zip default, HTTP Content-Encoding: deflate)
+    "deflate": lambda data: zlib.decompress(data, -15),
+    # Gzip (HTTP Content-Encoding: gzip, .gz files)
+    "gzip": gzip.decompress,
+    # Zlib (deflate + zlib header)
+    "zlib": zlib.decompress,
+    # Bzip2 (zip method 12, .bz2 files)
+    "bz2": bz2.decompress,
+    # LZMA (zip method 14, .xz/.lzma files)
+    "lzma": lzma.decompress,
+}
+
+# Optional decompressors (require pip packages)
+try:
+    import zstandard
+
+    _DECOMPRESSORS["zstd"] = zstandard.decompress
+except ImportError:
+    pass
+
+try:
+    import lz4.frame
+
+    _DECOMPRESSORS["lz4"] = lz4.frame.decompress
+except ImportError:
+    pass
+
+try:
+    import brotli
+
+    _DECOMPRESSORS["br"] = brotli.decompress
+except ImportError:
+    pass
+
+
+def _decode_content(data: bytes, encoding: str | None) -> bytes:
+    """Decompress data based on content_encoding.
+
+    If encoding is None or empty, returns data unchanged.
+    Raises ValueError for unsupported encodings.
+    """
+    if not encoding:
+        return data
+    decompressor = _DECOMPRESSORS.get(encoding)
+    if decompressor is None:
+        raise ValueError(
+            f"Unsupported content_encoding: {encoding!r}. "
+            f"Available: {', '.join(sorted(_DECOMPRESSORS))}"
+        )
+    return decompressor(data)
 
 
 @runtime_checkable
@@ -107,6 +172,7 @@ async def resolve_entry(
     from ._types import Addressing
 
     flags = entry.addressing
+    encoding = entry.content_encoding
 
     # 1. Inline text
     if Addressing.TEXT in flags and entry.text is not None:
@@ -116,7 +182,7 @@ async def resolve_entry(
     if Addressing.DATA in flags or Addressing.DATA_Z in flags:
         data = manifest.get_data(entry.path)
         if data is not None:
-            return data
+            return _decode_content(data, encoding)
 
     # 3. Link — follow _path target
     if Addressing.LINK in flags and entry.resolve is not None:
@@ -132,7 +198,6 @@ async def resolve_entry(
             _visited.add(entry.path)
             target_entry = manifest.get_entry(path_params["target"])
             if target_entry is not None:
-                # Extend chain with target's base_resolve if present
                 target_chain = list(base_resolve or [])
                 if target_entry.base_resolve:
                     target_br = json.loads(target_entry.base_resolve) if isinstance(target_entry.base_resolve, str) else target_entry.base_resolve
@@ -146,14 +211,13 @@ async def resolve_entry(
         resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
         for scheme, params in resolve_dict.items():
             if scheme.startswith("_"):
-                continue  # skip internal schemes
+                continue
             resolver = resolvers.get(scheme)
             if resolver is None:
                 continue
-            # Collect the base chain for this scheme
             scheme_bases = _collect_scheme_bases(scheme, base_resolve)
             result = await resolver.resolve(params, scheme_bases or None)
             if result is not None:
-                return result
+                return _decode_content(result, encoding)
 
     return None
