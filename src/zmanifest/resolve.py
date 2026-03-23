@@ -33,27 +33,13 @@ _DECOMPRESSORS: dict[str, Any] = {
     "lzma": lzma.decompress,
 }
 
-# Optional decompressors (require pip packages)
-try:
-    import zstandard
+import brotli
+import lz4.frame
+import zstandard
 
-    _DECOMPRESSORS["zstd"] = zstandard.decompress
-except ImportError:
-    pass
-
-try:
-    import lz4.frame
-
-    _DECOMPRESSORS["lz4"] = lz4.frame.decompress
-except ImportError:
-    pass
-
-try:
-    import brotli
-
-    _DECOMPRESSORS["br"] = brotli.decompress
-except ImportError:
-    pass
+_DECOMPRESSORS["zstd"] = zstandard.decompress
+_DECOMPRESSORS["lz4"] = lz4.frame.decompress
+_DECOMPRESSORS["br"] = brotli.decompress
 
 
 def _decode_content(data: bytes, encoding: str | None) -> bytes:
