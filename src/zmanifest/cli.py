@@ -451,7 +451,7 @@ def _zip_data_offset(info: Any) -> int:
 
 
 @cli.command("import-zip")
-@click.argument("zipfile_path", type=click.Path(exists=True))
+@click.argument("zipfile_path")
 @click.argument("output", type=click.Path())
 @click.option("--virtual", is_flag=True,
               help="Keep data in the zip file (store offset/length references).")
@@ -461,31 +461,50 @@ def _zip_data_offset(info: Any) -> int:
 @click.pass_context
 def import_zip(ctx: click.Context, zipfile_path: str, output: str,
                virtual: bool, zarr_format: str, prefix: str | None) -> None:
-    """Import entries from a zip file into a .zmp manifest.
+    """Import entries from a zip file or URL into a .zmp manifest.
 
     By default, extracts and inlines all zip entries. With --virtual,
     stores byte-range references back into the zip file instead, using
-    base_resolve to avoid repeating the zip path in every entry.
+    base_resolve to avoid repeating the zip path/URL in every entry.
 
-    Works with .zarr.zip files (zarr archives) and any other zip.
+    Works with local files, HTTP(S) URLs, and .zarr.zip archives.
+    Remote URLs use HTTP range requests (no full download needed).
     """
     import zipfile as zf
 
     verbose = ctx.obj.get("verbose", False)
     quiet = ctx.obj.get("quiet", False)
 
-    zip_path = Path(zipfile_path).resolve()
+    is_remote = zipfile_path.startswith(("http://", "https://"))
+
+    if is_remote:
+        resolve_url = zipfile_path
+    else:
+        local_path = Path(zipfile_path)
+        if not local_path.exists():
+            raise click.ClickException(f"File not found: {zipfile_path}")
+        resolve_url = str(local_path.resolve())
 
     if virtual:
         builder = Builder(
             zarr_format=zarr_format,
-            base_resolve={"http": {"url": str(zip_path)}},
+            base_resolve={"http": {"url": resolve_url}},
         )
     else:
         builder = Builder(zarr_format=zarr_format)
 
+    # Open zip — remotezip for URLs (range requests), zipfile for local
+    if is_remote:
+        import remotezip
+        try:
+            archive_cm = remotezip.RemoteZip(zipfile_path)
+        except remotezip.RemoteIOError as e:
+            raise click.ClickException(f"Cannot open remote zip: {e}")
+    else:
+        archive_cm = zf.ZipFile(str(local_path), "r")
+
     count = 0
-    with zf.ZipFile(str(zip_path), "r") as archive:
+    with archive_cm as archive:
         for info in archive.infolist():
             # Skip directories
             if info.is_dir():
@@ -497,9 +516,12 @@ def import_zip(ctx: click.Context, zipfile_path: str, output: str,
 
             archive_path = "/" + name
 
-            # JSON files are always inlined as text (small, needed for
-            # zarr structure discovery)
-            if name.endswith(".json"):
+            # Metadata files are always inlined as text (small, needed
+            # for zarr structure discovery). Covers zarr v3 (.json) and
+            # zarr v2 (.zarray, .zgroup, .zattrs, .zmetadata).
+            basename = name.rsplit("/", 1)[-1] if "/" in name else name
+            _TEXT_NAMES = {".zarray", ".zgroup", ".zattrs", ".zmetadata"}
+            if name.endswith(".json") or basename in _TEXT_NAMES:
                 data = archive.read(name)
                 try:
                     builder.add(archive_path, text=data.decode("utf-8"))

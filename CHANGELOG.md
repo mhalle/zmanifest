@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.15.0 (2026-03-22)
+
+### Features
+
+- **`zmp import-zip`**: Import entries from local or remote zip files.
+  Remote URLs use `remotezip` (HTTP range requests — no full download).
+  `--virtual` mode stores byte-range references back into the zip.
+  Zarr v2 metadata files (`.zarray`, `.zgroup`, `.zattrs`) are always
+  inlined as text.
+- **Remote zip support**: `remotezip` reads only the central directory
+  via range requests, then fetches individual entries on demand.
+- **Base-only resolve**: `HttpResolver` now works when the entry has
+  `offset`/`length` but no `url` — inherits the URL from `base_resolve`.
+
+### Dependencies
+
+- `httpx[http2]` and `remotezip>=0.12` are now required (were optional).
+
 ## v0.14.0 (2026-03-22)
 
 ### Features

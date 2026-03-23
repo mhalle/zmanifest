@@ -1,6 +1,6 @@
 [project]
 name = "zmanifest"
-version = "0.14.0"
+version = "0.15.0"
 description = "ZMP (Manifest Parquet) — content-addressed file manifest format"
 readme = "README.md"
 authors = [
@@ -14,6 +14,8 @@ dependencies = [
     "lz4>=4.0",
     "brotli>=1.0",
     "click>=8.0",
+    "httpx[http2]",
+    "remotezip>=0.12",
 ]
 
 [project.scripts]
@@ -21,7 +23,7 @@ zmp = "zmanifest.cli:cli"
 
 [project.optional-dependencies]
 git = ["vost>=0.78.1"]
-http = ["httpx[http2]"]
+http = []
 test = ["pytest", "pytest-asyncio", "vost>=0.78.1"]
 
 [build-system]
