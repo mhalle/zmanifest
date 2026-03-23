@@ -24,35 +24,118 @@ from an external source: a zip file entry, an HTTP response with
 | `zlib` | `zlib` (stdlib) | General | Deflate + zlib header |
 | `bz2` | `bz2` (stdlib) | Zip method 12, `.bz2` | |
 | `lzma` | `lzma` (stdlib) | Zip method 14, `.xz` | |
-| `zstd` | `zstandard` (pip) | Modern zip, HTTP | Optional dependency |
-| `lz4` | `lz4` (pip) | Columnar formats | Optional dependency |
-| `br` | `brotli` (pip) | HTTP (Brotli) | Optional dependency |
+| `zstd` | `zstandard` | Modern zip, HTTP | |
+| `lz4` | `lz4` | Columnar formats | |
+| `br` | `brotli` | HTTP (Brotli) | |
 
-The first five use Python stdlib only. The last three require optional
-pip packages and are silently unavailable if not installed.
+All are required dependencies.
+
+The `ContentEncoding` enum provides these as typed values:
+
+```python
+from zmanifest import ContentEncoding
+
+ContentEncoding.DEFLATE  # "deflate"
+ContentEncoding.GZIP     # "gzip"
+ContentEncoding.ZSTD     # "zstd"
+# etc.
+```
+
+## Size, content_size, and checksum
+
+Three fields interact with `content_encoding`. Their meaning depends
+on how the entry was created:
+
+### `Builder.add(data=X, compress="deflate")`
+
+The builder has the uncompressed data and compresses it.
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| `size` | `len(X)` | Logical size — decompressed bytes the consumer receives |
+| `content_size` | `len(compressed)` | Stored size — compressed bytes on disk |
+| `checksum` | `git_blob_hash(X)` | Hash of data before compression |
+| `content_encoding` | `"deflate"` | How to decompress |
+
+The checksum identifies the *logical content*. Two entries with the
+same checksum produce the same bytes after decompression, regardless
+of encoding.
+
+### `Builder.add(data=compressed_bytes, content_encoding="deflate", size=65536)`
+
+The caller provides pre-compressed data (e.g. extracted from a zip file).
+The builder doesn't know what the decompressed bytes look like.
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| `size` | `65536` (caller provides) | Logical size — caller must know this |
+| `content_size` | None (or `len(compressed_bytes)`) | Stored size |
+| `checksum` | `git_blob_hash(compressed_bytes)` | Hash of bytes as stored |
+| `content_encoding` | `"deflate"` | How to decompress |
+
+The checksum identifies the *stored representation*. This is the only
+option when the builder never sees the uncompressed bytes.
+
+### `Builder.add(data=X)` (no encoding)
+
+No compression. Everything is straightforward.
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| `size` | `len(X)` | Logical = stored (same thing) |
+| `content_size` | None | Not needed |
+| `checksum` | `git_blob_hash(X)` | Hash of bytes |
+| `content_encoding` | None | No decompression |
+
+### Summary
+
+| Scenario | `size` | `content_size` | `checksum` of |
+|----------|--------|----------------|---------------|
+| `compress=` | decompressed | compressed | decompressed (before our compression) |
+| `content_encoding=` | caller sets | compressed | compressed (as provided to us) |
+| no encoding | byte count | None | bytes as stored |
 
 ## Usage
 
-### Builder: storing pre-compressed data
+### Compress on ingest
+
+`Builder.add(compress=...)` compresses data as it's added:
+
+```python
+from zmanifest import Builder, ContentEncoding
+
+builder = Builder()
+
+# String form
+builder.add("/vol/c/0", data=raw_pixels, compress="deflate")
+
+# Enum form
+builder.add("/vol/c/1", data=raw_pixels, compress=ContentEncoding.ZSTD)
+
+# Cannot combine with content_encoding (data is already compressed)
+# or data_z (parquet-level compression)
+```
+
+### Storing pre-compressed data
+
+When data is already compressed (from a zip file, a compressed blob
+store, etc.), pass it as-is and declare the encoding:
 
 ```python
 import zlib
-from zmanifest import Builder
 
-raw_pixels = b"\x00" * 65536
 compressed = zlib.compress(raw_pixels)[2:-4]  # raw deflate
 
 builder = Builder()
 builder.add(
     "/vol/c/0",
-    data=compressed,                # store compressed bytes
+    data=compressed,                # store compressed bytes as-is
     content_encoding="deflate",     # tell resolver how to decompress
-    size=len(raw_pixels),           # logical (decompressed) size
+    size=len(raw_pixels),           # caller must provide logical size
 )
-builder.write("output.zmp")
 ```
 
-### Builder: referencing compressed data in a zip file
+### Referencing compressed data at a remote location
 
 ```python
 builder = Builder()
@@ -60,13 +143,12 @@ builder.add(
     "/vol/c/0",
     resolve={"http": {"url": "data.zip", "offset": 1234, "length": 5678}},
     content_encoding="deflate",
-    size=65536,
+    size=65536,                     # logical (decompressed) size
 )
 ```
 
-The resolver fetches 5678 bytes at offset 1234 from `data.zip`, then
-decompresses them as raw deflate. The consumer receives 65536 bytes
-of uncompressed data.
+The resolver fetches 5678 bytes at offset 1234, then decompresses
+as raw deflate. The consumer receives 65536 bytes.
 
 ### Resolve: transparent decompression
 
@@ -81,56 +163,13 @@ entry = manifest.get_entry("/vol/c/0")
 data = await resolve_entry(entry, manifest, resolvers)
 ```
 
-## Size fields
+## When to use what
 
-When `content_encoding` is set, there are two distinct sizes:
-
-| Field | Meaning | Example |
-|-------|---------|---------|
-| `size` | **Logical size** — decompressed bytes the consumer receives | 65536 |
-| `content_size` | **Stored size** — compressed bytes on disk or wire | 12000 |
-
-`size` is what matters to the consumer (buffer allocation, progress
-reporting). `content_size` is what matters for I/O (HTTP range length,
-parquet column bytes).
-
-When using `Builder.add(compress=...)`, both are set automatically:
-- `size` = `len(data)` before compression
-- `content_size` = `len(data)` after compression
-- `checksum` = hash of the uncompressed data
-
-When storing pre-compressed data with `content_encoding`, set `size`
-to the decompressed size explicitly. `content_size` is optional
-(defaults to the length of the stored bytes).
-
-## Compress on ingest
-
-`Builder.add(compress=...)` compresses data as it's added:
-
-```python
-from zmanifest import Builder, ContentEncoding
-
-builder = Builder()
-
-# Using string
-builder.add("/vol/c/0", data=raw_pixels, compress="deflate")
-
-# Using enum
-builder.add("/vol/c/1", data=raw_pixels, compress=ContentEncoding.ZSTD)
-
-# Cannot combine with content_encoding (data is already compressed)
-# or data_z (parquet-level compression)
-```
-
-The `ContentEncoding` enum values: `DEFLATE`, `GZIP`, `ZLIB`, `BZ2`,
-`LZMA`, `ZSTD`, `LZ4`, `BR`.
-
-## When to use `content_encoding` vs `data_z`
-
-| Scenario | Use | Why |
-|----------|-----|-----|
-| Zarr chunks (pre-compressed by zarr codecs) | `data` column, no encoding | Already compressed; double-compression wastes CPU |
-| Raw pixels stored compressed for size | `data` column + `content_encoding` | Compress once, decompress on read |
-| Compressible metadata/text | `data_z` column | Let parquet handle it with ZSTD |
-| Data fetched from a zip file | `resolve` + `content_encoding="deflate"` | Decompress the zip entry on fetch |
-| Data fetched from HTTP with gzip | `resolve` + `content_encoding="gzip"` | Decompress the HTTP response body |
+| Scenario | Approach |
+|----------|----------|
+| Zarr chunks (pre-compressed by zarr codecs) | `data=`, no encoding — already compressed, don't double-compress |
+| Raw pixels, want smaller archive | `data=, compress="zstd"` — builder compresses for you |
+| Data from a zip file | `data=, content_encoding="deflate"` — store as-is, decompress on read |
+| Reference to compressed remote data | `resolve=, content_encoding="deflate"` — fetch and decompress |
+| Compressible metadata/text | `data_z=` — let parquet's ZSTD column compression handle it |
+| Data fetched from HTTP with gzip | `resolve=, content_encoding="gzip"` — decompress the response body |
