@@ -27,7 +27,19 @@ def _to_manifest_path(path: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ManifestEntry:
-    """A single entry from the manifest (all columns except `data`)."""
+    """A single entry from the manifest (all columns except ``data``).
+
+    Attributes:
+        path: Absolute path in the archive (e.g. ``"/arr/c/0"``).
+        size: Logical (decompressed) size in bytes — what the consumer
+            receives after content decoding.
+        content_size: Stored (compressed) size in bytes — what's on disk
+            or over the wire. None if not compressed or not known.
+        checksum: Content hash (git-sha1 of uncompressed content).
+        content_encoding: Transport-level compression (e.g. ``"deflate"``,
+            ``"zstd"``). The resolve pipeline decompresses automatically.
+            See :class:`~zmanifest.ContentEncoding`.
+    """
 
     path: str
     size: int

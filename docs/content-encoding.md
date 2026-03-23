@@ -81,6 +81,50 @@ entry = manifest.get_entry("/vol/c/0")
 data = await resolve_entry(entry, manifest, resolvers)
 ```
 
+## Size fields
+
+When `content_encoding` is set, there are two distinct sizes:
+
+| Field | Meaning | Example |
+|-------|---------|---------|
+| `size` | **Logical size** — decompressed bytes the consumer receives | 65536 |
+| `content_size` | **Stored size** — compressed bytes on disk or wire | 12000 |
+
+`size` is what matters to the consumer (buffer allocation, progress
+reporting). `content_size` is what matters for I/O (HTTP range length,
+parquet column bytes).
+
+When using `Builder.add(compress=...)`, both are set automatically:
+- `size` = `len(data)` before compression
+- `content_size` = `len(data)` after compression
+- `checksum` = hash of the uncompressed data
+
+When storing pre-compressed data with `content_encoding`, set `size`
+to the decompressed size explicitly. `content_size` is optional
+(defaults to the length of the stored bytes).
+
+## Compress on ingest
+
+`Builder.add(compress=...)` compresses data as it's added:
+
+```python
+from zmanifest import Builder, ContentEncoding
+
+builder = Builder()
+
+# Using string
+builder.add("/vol/c/0", data=raw_pixels, compress="deflate")
+
+# Using enum
+builder.add("/vol/c/1", data=raw_pixels, compress=ContentEncoding.ZSTD)
+
+# Cannot combine with content_encoding (data is already compressed)
+# or data_z (parquet-level compression)
+```
+
+The `ContentEncoding` enum values: `DEFLATE`, `GZIP`, `ZLIB`, `BZ2`,
+`LZMA`, `ZSTD`, `LZ4`, `BR`.
+
 ## When to use `content_encoding` vs `data_z`
 
 | Scenario | Use | Why |
