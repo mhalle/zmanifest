@@ -20,6 +20,8 @@ The `zmp` command-line tool provides archive-style access to `.zmp` files:
 # Inspect
 zmp info archive.zmp
 zmp list -l archive.zmp
+zmp list --json archive.zmp
+zmp show archive.zmp /arr/c/0
 zmp cat archive.zmp /zarr.json
 zmp metadata archive.zmp
 
@@ -65,6 +67,20 @@ D       4096  a1b2c3d4e5f6  /arr/c/0
 D       4096  f6e5d4c3b2a1  /arr/c/1
 R      65536                /arr/c/2
 T        245  74d12a43f68d  /zarr.json
+```
+
+### `zmp show`
+
+Full detail for a single entry as JSON:
+
+```
+$ zmp show dataset.zmp /arr/c/0
+{
+  "path": "/arr/c/0",
+  "size": 4096,
+  "addressing": "D",
+  "checksum": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+}
 ```
 
 ### `zmp import-zip --virtual`
