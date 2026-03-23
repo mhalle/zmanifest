@@ -1,16 +1,29 @@
 # Changelog
 
-## v0.12.1 (2026-03-22)
+## v0.13.0 (2026-03-22)
 
 ### Features
 
-- **Content encoding**: The resolve pipeline now decompresses data based
+- **Content encoding**: The resolve pipeline decompresses data based
   on the `content_encoding` column. Supports `deflate`, `gzip`, `zlib`,
-  `bz2`, `lzma` (stdlib), plus `zstd`, `lz4`, `br` (optional pip deps).
-  This enables transparent access to data stored in zip files or fetched
-  from HTTP with compressed transfer encoding — no zarr codec changes
-  needed.
-- See `docs/content-encoding.md` for usage and examples.
+  `bz2`, `lzma`, `zstd`, `lz4`, `br`. All are required dependencies.
+  Transparent to consumers — `resolve_entry()` returns decompressed bytes.
+- **ContentEncoding enum**: Typed values for all 8 encodings
+  (`ContentEncoding.DEFLATE`, `.ZSTD`, etc.).
+- **Compress on ingest**: `Builder.add(compress="zstd")` compresses data
+  as it's added, sets `content_encoding` automatically, and records
+  `size` (logical) and `content_size` (compressed) correctly.
+- **Streaming builder**: `Builder(output="file.zmp")` streams data rows
+  to disk incrementally. Non-data rows buffered and written at `close()`.
+- **Size semantics documented**: `size` = logical (decompressed) bytes;
+  `content_size` = stored (compressed) bytes; `checksum` = hash of
+  data as provided (pre-compression for `compress=`, as-stored for
+  `content_encoding=`).
+- See `docs/content-encoding.md` for full documentation.
+
+### Dependencies
+
+- `zstandard`, `lz4`, `brotli` are now required (were optional).
 
 ## v0.12.0 (2026-03-22)
 
