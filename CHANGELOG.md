@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.14.0 (2026-03-22)
+
+### Features
+
+- **`zmp` CLI**: Command-line tool for inspecting, creating, and
+  manipulating `.zmp` manifest files. Subcommands:
+  - `zmp info` — archive summary (entries, sizes, metadata)
+  - `zmp list` — list contents (`-l` for detail, `--json`, `--prefix`)
+  - `zmp cat` — print entry content to stdout
+  - `zmp get` — extract single entry to file
+  - `zmp extract` — extract all inline entries to directory
+  - `zmp create` — create archive from files on disk
+  - `zmp metadata` — show archive or path metadata as JSON
+  - `zmp validate` — verify checksums of inline entries
+  - `zmp hash` / `dehydrate` / `hydrate` — conversion wrappers
+- **`url=` shortcut** in `Builder.add()`: `add("/c/0", url="...",
+  offset=N, length=M)` instead of verbose resolve dicts.
+
+### Dependencies
+
+- `click>=8.0` added (required for CLI).
+
 ## v0.13.0 (2026-03-22)
 
 ### Features
