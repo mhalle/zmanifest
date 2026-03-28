@@ -166,11 +166,15 @@ def _make_file_meta(
 
 
 def _make_writer(
-    output: str | Path,
+    output: str | Path | Any,
     schema: pa.Schema,
     data_compression_level: int | None = None,
 ) -> pq.ParquetWriter:
-    """Create a ParquetWriter with ZMP conventions."""
+    """Create a ParquetWriter with ZMP conventions.
+
+    ``output`` can be a file path (str/Path) or a writable file-like
+    object (e.g. ``io.BytesIO``).
+    """
     compression = {col: "zstd" for col in schema.names}
     compression["data"] = "none"
     use_dictionary = {col: False for col in schema.names}
@@ -179,8 +183,9 @@ def _make_writer(
     if data_compression_level is not None:
         compression_level = {"data": data_compression_level}
 
+    where = str(output) if isinstance(output, (str, Path)) else output
     return pq.ParquetWriter(
-        str(output),
+        where,
         schema,
         compression=compression,
         compression_level=compression_level,
@@ -668,17 +673,21 @@ class Builder:
         self._writer = None
         return self._output
 
-    def write(self, output: str | Path) -> Path:
-        """Batch mode: write all buffered rows to a file.
+    def write(self, output: str | Path | Any) -> Path | Any:
+        """Batch mode: write all buffered rows to a file or file-like object.
 
-        This is a convenience for small manifests where all rows fit
-        in memory. For large manifests, use streaming mode instead
-        (pass ``output=`` to the constructor).
+        Args:
+            output: File path (str/Path) or writable file-like object
+                (e.g. ``io.BytesIO``). If a file-like object, it is
+                written to but not closed.
 
         Returns:
-            Path to the written file.
+            The ``output`` argument (Path if a path was given, or the
+            file-like object).
         """
-        output = Path(output)
+        is_path = isinstance(output, (str, Path))
+        if is_path:
+            output = Path(output)
 
         # Collect all rows (non-data buffer has everything in batch mode)
         all_rows = list(self._non_data_rows)
