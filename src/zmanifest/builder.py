@@ -454,6 +454,8 @@ class Builder:
         source: str | None = None,
         base_resolve: dict | None = None,
         metadata: dict[str, object] | None = None,
+        is_mount: bool = False,
+        is_folder: bool = False,
     ) -> None:
         """Add an entry to the manifest.
 
@@ -501,6 +503,12 @@ class Builder:
             source: Provenance string.
             base_resolve: Default resolution params for this entry.
             metadata: Per-entry metadata dict.
+            is_mount: Mark as a mount point (addressing flag ``M``).
+                Use with ``is_folder=True`` and a ``resolve`` dict
+                pointing to a child ``.zmp`` file.
+            is_folder: Mark as a folder/annotation row (addressing
+                flag ``F``). Folder rows are excluded from zarr
+                store listing.
         """
         # Build resolve dict from url shortcut
         if url is not None:
@@ -597,6 +605,8 @@ class Builder:
             content_encoding=content_encoding,
             source=source,
             metadata=self._encode_metadata(metadata),
+            is_mount=is_mount,
+            is_folder=is_folder,
         )
 
         if row.has_data and self._streaming:
