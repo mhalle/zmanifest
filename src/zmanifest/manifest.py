@@ -27,7 +27,7 @@ def _to_manifest_path(path: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ManifestEntry:
-    """A single entry from the manifest (all columns except ``data``).
+    """A single entry from the manifest.
 
     Attributes:
         path: Absolute path in the archive (e.g. ``"/arr/c/0"``).
@@ -41,6 +41,12 @@ class ManifestEntry:
         content_encoding: Transport-level compression (e.g. ``"deflate"``,
             ``"zstd"``). The resolve pipeline decompresses automatically.
             See :class:`~zmanifest.ContentEncoding`.
+        text: Inline text content, or None.
+
+    For inline binary data, use ``manifest.get_data(entry.path)``.
+    Data is loaded lazily from the parquet ``data`` or ``data_z``
+    column — not held on the entry to avoid loading all blobs
+    into memory.
     """
 
     path: str
