@@ -1,4 +1,4 @@
-from ._types import Addressing, ContentEncoding, ManifestMetadata
+from ._types import Addressing, ContentEncoding, ContentType, ManifestMetadata
 from .builder import Builder, canonical_json, git_blob_hash
 from .path import ZPath
 from .convert import dehydrate, hash, hydrate
@@ -15,6 +15,7 @@ __all__ = [
     "Addressing",
     "Builder",
     "ContentEncoding",
+    "ContentType",
     "DicomWebResolver",
     "FileResolver",
     "GitResolver",

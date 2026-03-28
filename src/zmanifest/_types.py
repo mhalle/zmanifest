@@ -73,3 +73,14 @@ class ContentEncoding(enum.StrEnum):
     ZSTD = "zstd"         # Zstandard (modern zip, HTTP)
     LZ4 = "lz4"           # LZ4 frame format
     BR = "br"             # Brotli (HTTP)
+
+
+class ContentType(enum.StrEnum):
+    """MIME types for manifest entries.
+
+    Used in ``content_type`` to identify the format of inline or
+    referenced data.
+    """
+
+    PARQUET = "application/vnd.apache.parquet"
+    ZMP = "application/vnd.apache.parquet+zmp"
