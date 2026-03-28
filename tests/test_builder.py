@@ -357,6 +357,62 @@ class TestBuilder:
         assert entry.checksum == expected
 
 
+class TestBytesIOWrite:
+    def test_write_to_bytesio(self, tmp_path: Path) -> None:
+        """Builder.write() accepts a BytesIO and produces a valid manifest."""
+        import io
+
+        builder = Builder()
+        builder.add("/zarr.json", text='{"zarr_format":3,"node_type":"group"}')
+        chunk = np.array([1.0, 2.0], dtype="<f8").tobytes()
+        builder.add("/arr/c/0", data=chunk)
+
+        buf = io.BytesIO()
+        result = builder.write(buf)
+        assert result is buf
+        assert buf.tell() > 0
+
+        # Read it back from bytes
+        manifest = Manifest(buf.getvalue())
+        assert manifest.has("/zarr.json")
+        assert manifest.has("/arr/c/0")
+        assert manifest.get_data("/arr/c/0") == chunk
+
+        entry = manifest.get_entry("/zarr.json")
+        assert entry is not None
+        assert "group" in entry.text
+
+    def test_bytesio_matches_file(self, tmp_path: Path) -> None:
+        """BytesIO and file output produce equivalent manifests."""
+        import io
+
+        builder = Builder()
+        builder.add("/meta.json", text='{"key":"value"}')
+        builder.add("/chunk", data=b"\xAA" * 50)
+
+        # Write to file
+        file_path = builder.write(tmp_path / "out.zmp")
+        file_m = Manifest(str(file_path))
+
+        # Write to BytesIO (need a fresh builder — rows consumed)
+        builder2 = Builder()
+        builder2.add("/meta.json", text='{"key":"value"}')
+        builder2.add("/chunk", data=b"\xAA" * 50)
+        buf = io.BytesIO()
+        builder2.write(buf)
+        buf_m = Manifest(buf.getvalue())
+
+        # Same entries, same checksums
+        file_paths = sorted(list(file_m.list_paths()))
+        buf_paths = sorted(list(buf_m.list_paths()))
+        assert file_paths == buf_paths
+
+        for p in file_paths:
+            if p == "":
+                continue
+            assert file_m.get_entry(p).checksum == buf_m.get_entry(p).checksum
+
+
 class TestStreamingBuilder:
     def test_streaming_roundtrip(self, tmp_path: Path) -> None:
         """Streaming mode writes data rows to disk incrementally."""

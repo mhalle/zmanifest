@@ -509,12 +509,14 @@ class Builder:
             base_resolve: Default resolution params for this entry.
             metadata: Per-entry metadata dict.
             is_mount: Mark as a mount point (addressing flag ``M``).
-                Use with ``is_folder=True`` and a ``resolve`` dict
-                pointing to a child ``.zmp`` file.
+                Implies ``is_folder=True`` (mounts are always folders).
             is_folder: Mark as a folder/annotation row (addressing
                 flag ``F``). Folder rows are excluded from zarr
                 store listing.
         """
+        if is_mount:
+            is_folder = True
+
         # Build resolve dict from url shortcut
         if url is not None:
             if resolve is not None:
