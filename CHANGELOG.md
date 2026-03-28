@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.16.0 (2026-03-28)
+
+### Features
+
+- **`zmp import-tiff`**: Create virtual manifests from TIFF files
+  (local or remote via fsspec). Each strip/tile becomes a byte-range
+  reference. Supports zlib-compressed strips.
+- **`zmp show`**: Full entry detail as JSON.
+- **`is_mount`/`is_folder` in `Builder.add()`**: Create mount and
+  folder entries via the unified `add()` interface.
+- **HttpResolver base-only resolve**: Entries with just offset/length
+  (no url) inherit the URL from `base_resolve`.
+- **Cleaned up URL composition**: Removed directory-guessing heuristic.
+  Base URLs used as-is for byte-range access.
+- **`docs/resolve-chain.md`**: Full documentation of URL resolution,
+  base_resolve chain, byte-range access patterns.
+
 ## v0.15.1 (2026-03-22)
 
 ### Features
