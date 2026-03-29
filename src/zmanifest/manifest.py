@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,6 +11,32 @@ import pyarrow.parquet as pq
 
 from ._types import ManifestMetadata
 from .path import ZPath
+
+
+def _find_page_header_end(data: bytes, expected_first_length: int | None = None) -> int | None:
+    """Find where the Thrift page header ends in a parquet page.
+
+    The page header is followed by packed BYTE_ARRAY values as
+    [4-byte LE length][bytes]. If ``expected_first_length`` is given,
+    scan for that exact length prefix. Otherwise use heuristics.
+
+    Returns the byte offset where data values start, or None.
+    """
+    if expected_first_length is not None:
+        # Search for the exact expected length
+        target = struct.pack("<i", expected_first_length)
+        for offset in range(15, min(60, len(data) - 3)):
+            if data[offset:offset + 4] == target:
+                return offset
+        return None
+
+    # Heuristic: scan for a plausible non-negative length
+    MAX_BLOB = 1 << 30
+    for offset in range(15, min(60, len(data) - 4)):
+        length = struct.unpack_from("<i", data, offset)[0]
+        if 0 < length <= MAX_BLOB:
+            return offset
+    return None
 
 
 def _to_manifest_path(path: str) -> str:
@@ -483,6 +510,123 @@ class Manifest:
                 return None
             cumulative += rg_rows
         return None
+
+    def get_data_location(self, path: str) -> tuple[int, int] | None:
+        """Get the byte offset and length of inline data within this file.
+
+        Returns ``(offset, length)`` where offset is the byte position
+        in the parquet file where the raw blob bytes start, and length
+        is the blob size. The blob can be read directly via a range
+        request without a parquet reader.
+
+        Only works for the ``data`` column (uncompressed, PLAIN encoded).
+        Returns None if the entry has no inline data, or if the data
+        column uses dictionary encoding (old files).
+
+        Args:
+            path: Entry path.
+
+        Returns:
+            ``(offset, length)`` tuple, or None.
+        """
+        if not self._has_data_column:
+            return None
+        path = _to_manifest_path(path)
+        idx = self._index.get(path)
+        if idx is None:
+            return None
+
+        if self._pf is None:
+            return None
+
+        data_col_idx = self._pf.schema_arrow.get_field_index("data")
+
+        # Find which row group contains this row
+        cumulative = 0
+        for rg_idx in range(self._pf.metadata.num_row_groups):
+            rg_rows = self._pf.metadata.row_group(rg_idx).num_rows
+            if cumulative + rg_rows > idx:
+                local_idx = idx - cumulative
+                return self._locate_blob_in_row_group(
+                    rg_idx, data_col_idx, local_idx,
+                )
+            cumulative += rg_rows
+        return None
+
+    def _locate_blob_in_row_group(
+        self,
+        rg_idx: int,
+        col_idx: int,
+        local_row: int,
+    ) -> tuple[int, int] | None:
+        """Locate a BYTE_ARRAY value within a row group's data column.
+
+        Parses the Thrift page header and walks length-prefixed values
+        to find the exact file offset.
+        """
+        col_meta = self._pf.metadata.row_group(rg_idx).column(col_idx)
+
+        # Only works for uncompressed data column
+        if col_meta.compression != "UNCOMPRESSED":
+            return None
+
+        # Determine page offset — dictionary or data page
+        is_dict = col_meta.dictionary_page_offset is not None
+        if is_dict:
+            page_offset = col_meta.dictionary_page_offset
+        else:
+            page_offset = col_meta.data_page_offset
+
+        if page_offset is None or self._path is None:
+            return None
+
+        # Get the expected size of the first blob in this page
+        # to help locate the page header boundary
+        rg_start_row = sum(
+            self._pf.metadata.row_group(i).num_rows
+            for i in range(rg_idx)
+        )
+        first_entry = self._entry_at(rg_start_row)
+        expected_first = first_entry.size if first_entry else None
+
+        # Read a small prefix to find the page header end
+        with open(self._path, "rb") as f:
+            f.seek(page_offset)
+            prefix = f.read(100)
+
+        header_size = _find_page_header_end(prefix, expected_first)
+        if header_size is None:
+            return None
+
+        # Read the page data after the header
+        if is_dict:
+            total_size = col_meta.data_page_offset - page_offset
+        else:
+            total_size = col_meta.total_compressed_size
+
+        with open(self._path, "rb") as f:
+            f.seek(page_offset + header_size)
+            page_data = f.read(total_size - header_size)
+
+        # Walk [4-byte length][bytes] pairs to find local_row
+        pos = 0
+        for row in range(local_row + 1):
+            if pos + 4 > len(page_data):
+                return None
+            val_len = struct.unpack_from("<i", page_data, pos)[0]
+            if val_len < 0 or val_len > len(page_data) - pos - 4:
+                return None
+            if row == local_row:
+                file_offset = page_offset + header_size + pos + 4
+                return (file_offset, val_len)
+            pos += 4 + val_len
+
+        return None
+
+    @property
+    def file_path(self) -> str | None:
+        """Path to the underlying parquet file, or None for bytes-based."""
+        return self._path
 
     def _is_annotation(self, path: str) -> bool:
         """Annotation rows: archive row ("") and folder entries (F flag)."""
