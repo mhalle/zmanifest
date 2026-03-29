@@ -255,7 +255,7 @@ class Builder:
 
     def __init__(
         self,
-        output: str | Path | None = None,
+        output: str | Path | Any | None = None,
         *,
         zarr_format: str = "3",
         data_compression: str = "none",
@@ -264,7 +264,12 @@ class Builder:
         metadata: dict[str, object] | None = None,
         base_resolve: dict | None = None,
     ) -> None:
-        self._output = Path(output) if output is not None else None
+        if output is None:
+            self._output = None
+        elif isinstance(output, (str, Path)):
+            self._output = Path(output)
+        else:
+            self._output = output  # file-like object (BytesIO etc.)
         self._zarr_format = zarr_format
         self._data_compression = data_compression
         self._data_compression_level = data_compression_level
