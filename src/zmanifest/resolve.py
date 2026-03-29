@@ -196,10 +196,10 @@ async def resolve_entry(
         if data is not None:
             return _decode_content(data, encoding)
 
-    # 3. Link — follow _path target
+    # 3. Link — follow path target
     if Addressing.LINK in flags and entry.resolve is not None:
         resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
-        path_params = resolve_dict.get("_path")
+        path_params = resolve_dict.get("path") or resolve_dict.get("_path")
         if path_params and "target" in path_params:
             if _visited is None:
                 _visited = set()
@@ -222,8 +222,8 @@ async def resolve_entry(
     if Addressing.RESOLVE in flags and entry.resolve is not None and resolvers:
         resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
         for scheme, params in resolve_dict.items():
-            if scheme.startswith("_"):
-                continue
+            if scheme.startswith("_") or scheme == "path":
+                continue  # internal schemes
             resolver = resolvers.get(scheme)
             if resolver is None:
                 continue

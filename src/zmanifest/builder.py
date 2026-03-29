@@ -430,7 +430,7 @@ class Builder:
             folder = True
         path = _to_manifest_path(path)
         target = _to_manifest_path(target)
-        resolve_dict = {"_path": {"target": target}}
+        resolve_dict = {"path": {"target": target}}
         self._non_data_rows = [r for r in self._non_data_rows if r.path != path]
         self._non_data_rows.append(_Row(
             path=path,
