@@ -177,7 +177,14 @@ def _make_writer(
     """
     compression = {col: "zstd" for col in schema.names}
     compression["data"] = "none"
-    use_dictionary = {col: False for col in schema.names}
+    # Disable dictionary encoding for data columns (unique blobs;
+    # dictionary is useless and prevents direct byte access).
+    # Keep dictionary for low-cardinality columns (addressing, content_type, etc.).
+    # Note: dict-style {col: False} is buggy in pyarrow — use a list
+    # of columns that SHOULD use dictionary.
+    use_dictionary = [
+        col for col in schema.names if col != "data"
+    ]
 
     compression_level = None
     if data_compression_level is not None:
