@@ -11,20 +11,6 @@ if TYPE_CHECKING:
     from vost import GitStore
 
 
-_http_client = None
-
-
-def _get_http_client() -> Any:
-    """Return a shared httpx.AsyncClient with connection pooling."""
-    global _http_client
-    if _http_client is None:
-        import httpx
-        _http_client = httpx.AsyncClient(
-            timeout=60,
-            http2=True,
-        )
-    return _http_client
-
 
 class HttpResolver:
     """Resolves content via HTTP(S) URLs or local file paths.
@@ -32,9 +18,41 @@ class HttpResolver:
     Handles relative URLs via base params, byte ranges via offset/length,
     and multipart/related responses (DICOMweb).
 
+    Args:
+        timeout: Request timeout in seconds (default 60).
+        headers: Extra HTTP headers sent with every request
+            (e.g. ``{"Authorization": "Bearer xxx"}``).
+        follow_redirects: Follow HTTP redirects (default True).
+        http2: Use HTTP/2 when available (default True).
+
     Params: url, offset?, length?
     Base params: url (base URL for relative resolution)
     """
+
+    def __init__(
+        self,
+        *,
+        timeout: int | float = 60,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = True,
+        http2: bool = True,
+    ) -> None:
+        self._timeout = timeout
+        self._headers = headers or {}
+        self._follow_redirects = follow_redirects
+        self._http2 = http2
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            import httpx
+            self._client = httpx.AsyncClient(
+                timeout=self._timeout,
+                http2=self._http2,
+                follow_redirects=self._follow_redirects,
+                headers=self._headers,
+            )
+        return self._client
 
     async def resolve(self, params: dict, bases: list[dict] | None = None) -> bytes | None:
         from .resolve import _extract_multipart_frame
@@ -90,12 +108,12 @@ class HttpResolver:
                 return None
 
         # HTTP fetch
-        client = _get_http_client()
+        client = self._get_client()
         offset = params.get("offset")
         length = params.get("length")
         if offset is not None and length is not None:
-            headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
-            resp = await client.get(url, headers=headers)
+            req_headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
+            resp = await client.get(url, headers=req_headers)
         else:
             resp = await client.get(url)
 
@@ -172,7 +190,8 @@ class GitResolver:
             raw_url = repo_url.replace("github.com", "raw.githubusercontent.com")
             raw_url = raw_url.rstrip("/").removesuffix(".git")
             raw_url = f"{raw_url}/{ref}/{path}"
-            client = _get_http_client()
+            import httpx
+            client = httpx.AsyncClient(timeout=30)
             resp = await client.get(raw_url)
             if resp.status_code == 200:
                 return _apply_range(resp.content, params)
@@ -182,12 +201,40 @@ class GitResolver:
 class DicomWebResolver:
     """Resolves pixel data from DICOMweb WADO-RS endpoints.
 
+    Args:
+        timeout: Request timeout in seconds (default 60).
+        headers: Extra HTTP headers (e.g. auth tokens).
+            ``Accept: multipart/related`` is added automatically.
+        follow_redirects: Follow HTTP redirects (default True).
+        http2: Use HTTP/2 when available (default True).
+
     Params: url?, study, series, instance, frame?
     Base params: url (DICOMweb service base URL)
     """
 
-    def __init__(self, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: int | float = 60,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = True,
+        http2: bool = True,
+    ) -> None:
+        self._timeout = timeout
         self._headers = headers or {}
+        self._follow_redirects = follow_redirects
+        self._http2 = http2
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            import httpx
+            self._client = httpx.AsyncClient(
+                timeout=self._timeout,
+                http2=self._http2,
+                follow_redirects=self._follow_redirects,
+            )
+        return self._client
 
     async def resolve(self, params: dict, bases: list[dict] | None = None) -> bytes | None:
         from .resolve import _extract_multipart_frame
@@ -212,10 +259,10 @@ class DicomWebResolver:
         if frame is not None:
             url += f"/frames/{frame}"
 
-        client = _get_http_client()
-        headers = dict(self._headers)
-        headers.setdefault("Accept", "multipart/related; type=\"application/octet-stream\"")
-        resp = await client.get(url, headers=headers)
+        client = self._get_client()
+        req_headers = dict(self._headers)
+        req_headers.setdefault("Accept", "multipart/related; type=\"application/octet-stream\"")
+        resp = await client.get(url, headers=req_headers)
 
         if resp.status_code not in (200, 206):
             return None
