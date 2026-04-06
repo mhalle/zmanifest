@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import rfc8785
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from .builder import canonical_json, git_blob_hash
 from .manifest import Manifest
@@ -184,8 +184,9 @@ def dehydrate(
 def hydrate(
     input: str | Path,
     output: str | Path,
-    resolver: _LegacyResolver,
+    resolver: _LegacyResolver | None = None,
     *,
+    resolvers: dict[str, Any] | None = None,
     paths: list[str] | None = None,
     prefix: str | None = None,
     max_rows_per_group: int | None = None,
@@ -195,10 +196,16 @@ def hydrate(
     Without filters, resolves all entries (full hydrate). With ``paths``
     or ``prefix``, only resolves matching entries (partial hydrate).
 
+    Entries are resolved in this order:
+    1. Already inline (data or text) — kept as-is.
+    2. Has a ``resolve`` column — resolved via scheme resolvers.
+    3. Has a ``retrieval_key`` — resolved via the legacy resolver.
+
     Args:
         input: Path to the source ``.zmp`` file.
         output: Path for the output ``.zmp`` file.
-        resolver: Blob resolver to fetch content by retrieval key.
+        resolver: Legacy blob resolver (by retrieval key).
+        resolvers: Scheme-based resolvers (e.g. ``{"http": HttpResolver()}``).
         paths: Only hydrate these specific paths.
         prefix: Only hydrate paths starting with this prefix.
         max_rows_per_group: Override row group sizing (default: 2).
@@ -206,49 +213,75 @@ def hydrate(
     Returns:
         Path to the written file.
     """
+    from .resolve import resolve_entry, get_file_base_resolve, build_base_chain
+
     output = Path(output)
+    manifest = Manifest(str(input))
     pf = pq.ParquetFile(str(input))
     table = pf.read()
 
     path_set = set(paths) if paths else None
     filter_active = path_set is not None or prefix is not None
 
-    data_list: list[bytes | None] = []
+    # Build base_resolve chain from file-level metadata
+    file_base = get_file_base_resolve(manifest)
+    base_chain = build_base_chain(file_base) if file_base else None
+
     data_col = table.column("data") if "data" in table.column_names else None
     rk_col = table.column("retrieval_key") if "retrieval_key" in table.column_names else None
     path_col = table.column("path")
     text_col = table.column("text") if "text" in table.column_names else None
 
-    for i in range(len(table)):
-        # Already has inline data — keep it
-        existing = data_col[i].as_py() if data_col is not None else None
-        if existing is not None:
-            data_list.append(existing)
-            continue
+    async def _resolve_all() -> list[bytes | None]:
+        data_list: list[bytes | None] = []
+        for i in range(len(table)):
+            # Already has inline data — keep it
+            existing = data_col[i].as_py() if data_col is not None else None
+            if existing is not None:
+                data_list.append(existing)
+                continue
 
-        # Already has inline text — nothing to hydrate
-        text = text_col[i].as_py() if text_col is not None else None
-        if text is not None:
-            data_list.append(None)
-            continue
-
-        # Check filter
-        if filter_active:
-            p = path_col[i].as_py()
-            match = (path_set is not None and p in path_set) or (
-                prefix is not None and p.startswith(prefix)
-            )
-            if not match:
+            # Already has inline text — nothing to hydrate
+            text = text_col[i].as_py() if text_col is not None else None
+            if text is not None:
                 data_list.append(None)
                 continue
 
-        # Resolve via retrieval key
-        key = rk_col[i].as_py() if rk_col is not None else None
-        if key is not None:
-            blob = asyncio.run(resolver.resolve(key))
-            data_list.append(blob)
-        else:
-            data_list.append(None)
+            # Check filter
+            if filter_active:
+                p = path_col[i].as_py()
+                match = (path_set is not None and p in path_set) or (
+                    prefix is not None and p.startswith(prefix)
+                )
+                if not match:
+                    data_list.append(None)
+                    continue
+
+            # Try scheme-based resolve (http, git, etc.)
+            entry = manifest.get_entry(path_col[i].as_py())
+            if entry is not None and entry.resolve and resolvers:
+                entry_chain = list(base_chain or [])
+                if entry.base_resolve:
+                    br = json.loads(entry.base_resolve) if isinstance(entry.base_resolve, str) else entry.base_resolve
+                    entry_chain.append(br)
+                blob = await resolve_entry(
+                    entry, manifest, resolvers, entry_chain or None,
+                )
+                if blob is not None:
+                    data_list.append(blob)
+                    continue
+
+            # Fall back to legacy retrieval_key resolver
+            key = rk_col[i].as_py() if rk_col is not None else None
+            if key is not None and resolver is not None:
+                blob = await resolver.resolve(key)
+                data_list.append(blob)
+            else:
+                data_list.append(None)
+
+        return data_list
+
+    data_list = asyncio.run(_resolve_all())
 
     # Replace data column
     new_data = pa.array(data_list, type=pa.binary())

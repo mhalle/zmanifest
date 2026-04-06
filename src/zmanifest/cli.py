@@ -852,19 +852,26 @@ def hydrate(ctx: click.Context, input: str, output: str,
             chunk_dir: str | None, prefix: str | None) -> None:
     """Resolve references and inline data."""
     from . import convert
+    from .resolver import HttpResolver, GitResolver
 
-    if chunk_dir is None:
-        raise click.ClickException("--chunk-dir is required for hydrate")
+    # Scheme-based resolvers for entries with a resolve column
+    resolvers = {"http": HttpResolver(), "git": GitResolver()}
 
-    chunk_path = Path(chunk_dir)
+    # Legacy retrieval_key resolver via chunk-dir
+    legacy_resolver = None
+    if chunk_dir is not None:
+        chunk_path = Path(chunk_dir)
 
-    class _FileResolver:
-        async def resolve(self, key: str) -> bytes | None:
-            p = chunk_path / key
-            if p.exists():
-                return p.read_bytes()
-            return None
+        class _FileResolver:
+            async def resolve(self, key: str) -> bytes | None:
+                p = chunk_path / key
+                if p.exists():
+                    return p.read_bytes()
+                return None
 
-    result = convert.hydrate(input, output, _FileResolver(), prefix=prefix)
+        legacy_resolver = _FileResolver()
+
+    result = convert.hydrate(input, output, legacy_resolver,
+                             resolvers=resolvers, prefix=prefix)
     if not ctx.obj.get("quiet"):
         click.echo(f"Wrote {result}", err=True)
